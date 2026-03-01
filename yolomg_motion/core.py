@@ -6,6 +6,8 @@ result, never an unregistered difference masquerading as a valid motion map.
 """
 from collections import deque
 from dataclasses import dataclass
+from math import isfinite
+from numbers import Integral, Real
 from typing import Optional
 
 import cv2
@@ -34,6 +36,21 @@ class MotionConfig:
     close_iterations: int = 1
 
     def __post_init__(self):
+        # Dataclass annotations do not validate JSON or public Python inputs.
+        # Check types before ranges so malformed settings fail here, rather
+        # than later in deque construction or an opaque OpenCV overload error.
+        for key in ('frame_step', 'blur_size', 'grid_step', 'grid_step_y',
+                    'alignment_width', 'alignment_height', 'lk_window',
+                    'lk_levels', 'lk_iterations', 'min_inliers', 'morph_kernel',
+                    'open_iterations', 'close_iterations'):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not isinstance(value, Integral):
+                raise ValueError(f'{key} must be an integer')
+        for key in ('lk_epsilon', 'ransac_threshold', 'min_inlier_ratio',
+                    'fb_threshold', 'min_overlap'):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value):
+                raise ValueError(f'{key} must be a finite number')
         for key in ('frame_step', 'grid_step', 'grid_step_y', 'alignment_width',
                     'alignment_height', 'lk_iterations'):
             if getattr(self, key) < 1:
