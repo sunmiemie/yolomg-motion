@@ -6,6 +6,8 @@ beyond ``max_detector_gap`` source frames. This is a tracking utility, not a
 drone classifier and not a component claimed by the YOLOMG paper.
 """
 from dataclasses import dataclass
+from math import isfinite
+from numbers import Integral, Real
 from typing import List, Optional, Tuple
 
 import cv2
@@ -64,6 +66,17 @@ class SingleTargetTracker:
         from .opencl_motion import backend_information
         self.backend = backend
         self.backend_info = backend_information(backend)
+        integer_settings = dict(confirmations=confirmations, max_detector_gap=max_detector_gap,
+                                search_radius=search_radius, min_template_width=min_template_width,
+                                min_template_height=min_template_height)
+        for name, value in integer_settings.items():
+            if isinstance(value, bool) or not isinstance(value, Integral):
+                raise ValueError(f'{name} must be an integer')
+        real_settings = dict(min_confidence=min_confidence, appearance_threshold=appearance_threshold,
+                             max_size_ratio=max_size_ratio, min_template_std=min_template_std)
+        for name, value in real_settings.items():
+            if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value):
+                raise ValueError(f'{name} must be a finite number')
         if confirmations < 1 or max_detector_gap < 1:
             raise ValueError('confirmations and max_detector_gap must be positive')
         if search_radius < 1 or min_template_width < 2 or min_template_height < 2:
@@ -249,7 +262,7 @@ class SingleTargetTracker:
             raise ValueError('Expected uint8 BGR frame')
         if frame.ndim != 3 or frame.shape[2] != 3 or min(frame.shape[:2]) < 16:
             raise ValueError('Expected BGR frame of at least 16x16 pixels')
-        if not isinstance(frame_index, (int, np.integer)) or frame_index < 0:
+        if isinstance(frame_index, bool) or not isinstance(frame_index, (int, np.integer)) or frame_index < 0:
             raise ValueError('frame_index must be a nonnegative integer')
         if self._last_frame_index is not None and frame_index <= self._last_frame_index:
             raise ValueError('frame_index must strictly increase; call reset for a new sequence')
