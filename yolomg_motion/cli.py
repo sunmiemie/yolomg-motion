@@ -74,8 +74,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.input.is_file():
         parser.error(f'Input video not found: {args.input}')
-    if args.max_frames < 0 or args.start_frame < 0 or args.snapshot_every < 1 or args.preview_gain <= 0:
+    if (args.max_frames < 0 or args.start_frame < 0 or args.snapshot_every < 1
+            or not np.isfinite(args.preview_gain) or args.preview_gain <= 0):
         parser.error('Invalid frame limits, snapshot interval, or preview gain')
+    if args.output.exists():
+        if not args.output.is_dir():
+            parser.error('Output must be a directory; choose a new directory')
+        if any(args.output.iterdir()):
+            parser.error('Output directory is not empty; choose a new directory')
     settings = dict(frame_step=args.frame_step, fb_threshold=args.fb_threshold,
                     alignment_width=args.alignment_width, alignment_height=args.alignment_height)
     if args.config:
@@ -95,9 +101,6 @@ def main(argv=None):
     cap = cv2.VideoCapture(str(args.input))
     if not cap.isOpened():
         parser.error(f'OpenCV cannot open video: {args.input}')
-    if args.output.exists() and any(args.output.iterdir()):
-        cap.release()
-        parser.error('Output directory is not empty; choose a new directory')
     args.output.mkdir(parents=True, exist_ok=True)
     if args.save_maps:
         (args.output/'maps').mkdir()

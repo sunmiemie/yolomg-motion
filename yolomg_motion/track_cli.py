@@ -126,8 +126,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.input.is_file():
         parser.error(f'Input not found: {args.input}')
-    if args.output.exists() and any(args.output.iterdir()):
-        parser.error('Output directory is not empty; choose a new directory')
+    if args.output.exists():
+        if not args.output.is_dir():
+            parser.error('Output must be a directory; choose a new directory')
+        if any(args.output.iterdir()):
+            parser.error('Output directory is not empty; choose a new directory')
+    if args.image_size < 32:
+        parser.error('image-size must be at least 32')
     if min(args.detect_every, args.threads, args.snapshot_every, args.max_detector_gap) < 1 or min(args.max_frames, args.gpu_id) < 0:
         parser.error('Invalid frame interval, threads, or frame limit')
     if args.motion_cache and args.motion_backend != 'cpu':
