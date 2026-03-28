@@ -139,10 +139,15 @@ class YOLOMGDetector:
         return self.model(rgb, motion, augment=False)[0]
 
     def detect(self, frame_bgr, motion_float32):
-        if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3 or frame_bgr.dtype != np.uint8:
+        if (not isinstance(frame_bgr, np.ndarray) or frame_bgr.ndim != 3
+                or frame_bgr.shape[2] != 3 or frame_bgr.dtype != np.uint8
+                or min(frame_bgr.shape[:2]) < 1):
             raise ValueError("frame_bgr must be a uint8 H x W x 3 BGR image")
-        if motion_float32.ndim != 2 or motion_float32.shape != frame_bgr.shape[:2]:
+        if (not isinstance(motion_float32, np.ndarray) or motion_float32.ndim != 2
+                or motion_float32.shape != frame_bgr.shape[:2]):
             raise ValueError("Motion map must be grayscale with the same H x W as the frame")
+        if motion_float32.dtype.kind not in 'uif':
+            raise ValueError("Motion map must contain real numeric intensities")
         if not np.isfinite(motion_float32).all():
             raise ValueError("Motion map contains non-finite values")
         if np.any(motion_float32 < 0) or np.any(motion_float32 > 255):
