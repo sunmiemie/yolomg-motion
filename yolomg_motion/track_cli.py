@@ -56,7 +56,7 @@ def draw_result(frame, result, frame_index, fps, zoom=False):
 
 
 def cached_centers(cap, cache, input_path, max_frames):
-    summary = json.loads((cache/'summary.json').read_text(encoding='utf-8'))
+    summary = json.loads((cache/'summary.json').read_text(encoding='utf-8-sig'))
     if Path(summary['input']).resolve() != input_path.resolve():
         raise ValueError('Motion cache belongs to a different input video')
     if summary.get('first_center_index') != 2 or summary.get('config', {}).get('frame_step') != 2:
@@ -72,10 +72,17 @@ def cached_centers(cap, cache, input_path, max_frames):
         if 2 <= index <= end:
             path = cache/'maps'/f'{index:06d}.npz'
             with np.load(path, allow_pickle=False) as data:
-                if int(data['center_index']) != index or data['difference'].shape != frame.shape[:2]:
+                saved_index, difference, success = data['center_index'], data['difference'], data['success']
+                if (saved_index.shape != () or saved_index.dtype.kind not in 'iu'
+                        or saved_index.item() != index or difference.shape != frame.shape[:2]):
                     raise ValueError(f'Motion cache index/shape mismatch: {path}')
+                if (difference.dtype.kind not in 'uif' or not np.isfinite(difference).all()
+                        or np.any(difference < 0) or np.any(difference > 255)):
+                    raise ValueError(f'Motion cache must contain finite 0..255 intensities: {path}')
+                if success.shape != () or success.dtype.kind not in 'biu' or success.item() not in (0, 1):
+                    raise ValueError(f'Motion cache success must be a scalar boolean: {path}')
                 # Official training uses the unthresholded three-frame residual.
-                yield index, frame, data['difference'].copy(), bool(data['success'])
+                yield index, frame, difference.copy(), bool(success.item())
         index += 1
 
 
