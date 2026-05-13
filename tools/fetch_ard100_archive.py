@@ -2,6 +2,7 @@
 import argparse
 import io
 import json
+import operator
 from pathlib import Path
 import zipfile
 
@@ -14,6 +15,9 @@ RECORD = 'https://zenodo.org/api/records/15870538'
 class HTTPRangeFile(io.RawIOBase):
     def __init__(self, url, size):
         super().__init__()
+        size = operator.index(size)
+        if size < 0:
+            raise ValueError('Archive size must be nonnegative')
         self.url, self.size, self.position = url, size, 0
         self.session = requests.Session()
 
@@ -24,9 +28,14 @@ class HTTPRangeFile(io.RawIOBase):
         return True
 
     def tell(self):
+        self._checkClosed()
         return self.position
 
     def seek(self, offset, whence=0):
+        self._checkClosed()
+        offset, whence = operator.index(offset), operator.index(whence)
+        if whence not in (0, 1, 2):
+            raise ValueError('Invalid seek origin')
         position = offset if whence == 0 else self.position+offset if whence == 1 else self.size+offset
         if position < 0:
             raise ValueError('Cannot seek before the archive')
@@ -34,16 +43,20 @@ class HTTPRangeFile(io.RawIOBase):
         return position
 
     def read(self, size=-1):
+        self._checkClosed()
+        size = -1 if size is None else operator.index(size)
         size = min(self.size-self.position, size if size >= 0 else self.size-self.position)
         if size <= 0:
             return b''
         start, end = self.position, self.position+size-1
-        with self.session.get(self.url, headers={'Range': f'bytes={start}-{end}'},
+        with self.session.get(self.url, headers={'Range': f'bytes={start}-{end}', 'Accept-Encoding': 'identity'},
                               stream=True, timeout=(20, 90)) as response:
             response.raise_for_status()
             expected = f'bytes {start}-{end}/{self.size}'
             if response.status_code != 206 or response.headers.get('Content-Range') != expected:
                 raise IOError(f'Expected exact partial response {expected}, got {response.status_code} {response.headers.get("Content-Range")}')
+            if response.headers.get('Content-Encoding', 'identity').lower() != 'identity':
+                raise IOError('Partial archive response must not be content-encoded')
             content = response.raw.read(size+1)
         if len(content) != size:
             raise IOError('Partial download was truncated')
