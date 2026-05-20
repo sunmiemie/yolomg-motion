@@ -48,3 +48,18 @@ def test_encoded_or_truncated_response_does_not_advance(monkeypatch):
 
 def test_invalid_archive_size_rejected():
     with pytest.raises(ValueError): HTTPRangeFile('unused', -1)
+
+
+def test_ranges_cannot_mix_different_archive_versions(monkeypatch):
+    with HTTPRangeFile('https://example.test/archive', 4) as remote:
+        calls = []
+        def get(url, **kwargs):
+            calls.append(kwargs['headers'])
+            if len(calls) == 1:
+                return Response(b'ab', {'Content-Range': 'bytes 0-1/4', 'ETag': '"original"'})
+            return Response(b'cd', {'Content-Range': 'bytes 2-3/4', 'ETag': '"changed"'})
+        monkeypatch.setattr(remote.session, 'get', get)
+        assert remote.read(2) == b'ab'
+        with pytest.raises(IOError, match='changed'): remote.read(2)
+        assert calls[1]['If-Range'] == '"original"'
+        assert remote.tell() == 2

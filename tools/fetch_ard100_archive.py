@@ -20,6 +20,7 @@ class HTTPRangeFile(io.RawIOBase):
             raise ValueError('Archive size must be nonnegative')
         self.url, self.size, self.position = url, size, 0
         self.session = requests.Session()
+        self._validator = None
 
     def readable(self):
         return True
@@ -49,7 +50,10 @@ class HTTPRangeFile(io.RawIOBase):
         if size <= 0:
             return b''
         start, end = self.position, self.position+size-1
-        with self.session.get(self.url, headers={'Range': f'bytes={start}-{end}', 'Accept-Encoding': 'identity'},
+        headers = {'Range': f'bytes={start}-{end}', 'Accept-Encoding': 'identity'}
+        if self._validator is not None:
+            headers['If-Range'] = self._validator[1]
+        with self.session.get(self.url, headers=headers,
                               stream=True, timeout=(20, 90)) as response:
             response.raise_for_status()
             expected = f'bytes {start}-{end}/{self.size}'
@@ -57,10 +61,17 @@ class HTTPRangeFile(io.RawIOBase):
                 raise IOError(f'Expected exact partial response {expected}, got {response.status_code} {response.headers.get("Content-Range")}')
             if response.headers.get('Content-Encoding', 'identity').lower() != 'identity':
                 raise IOError('Partial archive response must not be content-encoded')
+            etag = response.headers.get('ETag')
+            validator = (('ETag', etag) if etag and not etag.startswith('W/') else
+                         ('Last-Modified', response.headers['Last-Modified'])
+                         if response.headers.get('Last-Modified') else None)
+            if self._validator is not None and validator != self._validator:
+                raise IOError('Remote archive changed between range reads')
             content = response.raw.read(size+1)
         if len(content) != size:
             raise IOError('Partial download was truncated')
         self.position += size
+        self._validator = validator
         return content
 
     def close(self):
