@@ -24,6 +24,19 @@ def _validate_parts(rows, metadata):
         raise ValueError('Tracking metadata must be an object')
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'Duplicate JSON key in tracking artifact: {key}')
+        result[key] = value
+    return result
+
+
+def _read_json(path):
+    return json.loads(path.read_text(encoding='utf-8-sig'), object_pairs_hook=_unique_object)
+
+
 def read_tracking_run(run_dir, *, strict_finite=False):
     """Return ``(rows, metadata)`` for v2 or legacy tracks+summary runs.
 
@@ -32,10 +45,10 @@ def read_tracking_run(run_dir, *, strict_finite=False):
     Schema and container shape are always checked; no frame data are rewritten.
     """
     run_dir = Path(run_dir)
-    payload = json.loads((run_dir/'tracks.json').read_text(encoding='utf-8-sig'))
+    payload = _read_json(run_dir/'tracks.json')
     if isinstance(payload, list):
         rows = payload
-        metadata = json.loads((run_dir/'summary.json').read_text(encoding='utf-8-sig'))
+        metadata = _read_json(run_dir/'summary.json')
     elif isinstance(payload, dict) and payload.get('schema_version') == 2:
         rows, metadata = payload.get('frames'), payload.get('metadata')
     else:
