@@ -271,8 +271,10 @@ class MotionExtractor:
         _validate_frame(frame)
         if self._shape is not None and frame.shape != self._shape:
             raise ValueError('Frame shape changed; reset() before starting a new sequence')
+        prepared = self._prepare(frame)
+        original = frame.copy()
         self._shape = frame.shape
-        self._frames.append((frame.copy(), self._prepare(frame)))
+        self._frames.append((original, prepared))
         self._received += 1
         k = self.config.frame_step
         if len(self._frames) < 2*k+1:
