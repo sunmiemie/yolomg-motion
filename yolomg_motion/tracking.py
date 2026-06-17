@@ -268,8 +268,6 @@ class SingleTargetTracker:
             raise ValueError('frame_index must strictly increase; call reset for a new sequence')
         if self._frame_shape is not None and frame.shape != self._frame_shape:
             raise ValueError('Frame shape changed; call reset for a new sequence')
-        self._frame_shape = frame.shape
-        self._last_frame_index = int(frame_index)
         if self.backend == 'opencl':
             from .opencl_motion import ensure_opencl_enabled
             ensure_opencl_enabled()
@@ -278,6 +276,10 @@ class SingleTargetTracker:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         eligible = None if detections is None else self._valid_detections(
             detections, frame.shape[1], frame.shape[0])
+        # Rejected input/preprocessing must not consume the source index. In
+        # particular, a transient GPU error can be retried with the same frame.
+        self._frame_shape = frame.shape
+        self._last_frame_index = int(frame_index)
 
         if self._state in ('SEARCHING', 'LOST'):
             if eligible:
