@@ -176,6 +176,7 @@ def main(argv=None):
                                   backend=args.tracking_backend)
     cap = cv2.VideoCapture(str(args.input))
     if not cap.isOpened():
+        cap.release()
         parser.error('Cannot open video')
     fps = float(cap.get(cv2.CAP_PROP_FPS))
     if not np.isfinite(fps) or fps <= 0:
@@ -183,10 +184,10 @@ def main(argv=None):
         parser.error('Video has no valid FPS')
     try:
         extractor = None if args.motion_cache else MotionExtractor(MotionConfig(), backend=args.motion_backend)
+        args.output.mkdir(parents=True, exist_ok=False) if not args.output.exists() else None
     except BaseException:
         cap.release()
         raise
-    args.output.mkdir(parents=True, exist_ok=False) if not args.output.exists() else None
     rows, writer = [], None
     video_frames_written, processing_error = 0, None
     status, current_index = 'complete', None

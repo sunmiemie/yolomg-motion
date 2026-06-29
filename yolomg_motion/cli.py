@@ -99,22 +99,23 @@ def main(argv=None):
     except (ValueError, TypeError) as error:
         parser.error(str(error))
     cap = cv2.VideoCapture(str(args.input))
-    if not cap.isOpened():
-        parser.error(f'OpenCV cannot open video: {args.input}')
-    args.output.mkdir(parents=True, exist_ok=True)
-    if args.save_maps:
-        (args.output/'maps').mkdir()
-    fps = float(cap.get(cv2.CAP_PROP_FPS))
-    if not np.isfinite(fps) or fps <= 0:
+    try:
+        if not cap.isOpened():
+            parser.error(f'OpenCV cannot open video: {args.input}')
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        if not np.isfinite(fps) or fps <= 0:
+            parser.error('Video has no valid FPS metadata')
+        # Sequentially discard the prefix to retain exact source indices.
+        for _ in range(args.start_frame):
+            if not cap.grab():
+                parser.error('start-frame is past the end of the video')
+        extractor = MotionExtractor(cfg)
+        args.output.mkdir(parents=True, exist_ok=True)
+        if args.save_maps:
+            (args.output/'maps').mkdir()
+    except BaseException:
         cap.release()
-        parser.error('Video has no valid FPS metadata')
-    # Sequentially discard the prefix so center_index is not affected by
-    # codec-specific approximate seeking to keyframes.
-    for _ in range(args.start_frame):
-        if not cap.grab():
-            cap.release()
-            parser.error('start-frame is past the end of the video')
-    extractor = MotionExtractor(cfg)
+        raise
     rows, writer = [], None
     read_count, processing_seconds = 0, 0.0
     began = perf_counter()
