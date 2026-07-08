@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from .core import MotionConfig, MotionExtractor
+from .run_artifacts import write_json_atomic
 
 
 def write_image(path, data):
@@ -119,6 +120,7 @@ def main(argv=None):
     rows, writer = [], None
     read_count, processing_seconds = 0, 0.0
     began = perf_counter()
+    processing_error = None
     try:
         while not args.max_frames or read_count < args.max_frames:
             ok, frame = cap.read()
@@ -161,6 +163,8 @@ def main(argv=None):
                 write_image(str(stem)+'.png', np.rint(result.motion).clip(0, 255).astype(np.uint8))
             if len(rows) % 30 == 0:
                 print(f'Processed {len(rows)} centers; current source frame {result.center_index}', flush=True)
+    except BaseException as error:
+        processing_error = error
     finally:
         cap.release()
         if writer is not None:
@@ -169,6 +173,11 @@ def main(argv=None):
     before = float(np.mean([r['unaligned_mean'] for r in valid_rows])) if valid_rows else None
     after = float(np.mean([r['aligned_mean'] for r in valid_rows])) if valid_rows else None
     summary = dict(input=str(args.input.resolve()), config=asdict(cfg), video_fps=fps,
+                   status=('complete' if processing_error is None else
+                           'interrupted' if isinstance(processing_error, KeyboardInterrupt) else 'failed'),
+                   completed=processing_error is None, partial=processing_error is not None,
+                   error=None if processing_error is None else
+                         dict(type=type(processing_error).__name__, message=str(processing_error)),
                    input_frames_read=read_count, output_frames=len(rows), valid_frames=len(valid_rows),
                    failed_frames=len(rows)-len(valid_rows),
                    first_center_index=rows[0]['center_index'] if rows else None,
@@ -180,9 +189,11 @@ def main(argv=None):
                    difference_reduction=1-after/before if before and after is not None else None,
                    preview_gain=args.preview_gain,
                    metric_note='Means use the same valid area and include moving targets; these are not detection AP or accuracy.')
-    (args.output/'diagnostics.json').write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding='utf-8')
-    (args.output/'summary.json').write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding='utf-8')
+    write_json_atomic(args.output/'diagnostics.json', rows)
+    write_json_atomic(args.output/'summary.json', summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if processing_error is not None:
+        raise processing_error
     return 0 if rows and valid_rows else 2
 
 

@@ -77,20 +77,26 @@ def write_tracking_run(run_dir, rows, metadata):
     """
     _validate_parts(rows, metadata)
     payload = dict(schema_version=2, metadata=metadata, frames=rows)
+    write_json_atomic(Path(run_dir)/'tracks.json', payload)
+
+
+def write_json_atomic(path, payload):
+    """Publish a finite JSON document without exposing a truncated file."""
     serialized = json.dumps(payload, ensure_ascii=False, indent=2,
                             allow_nan=False, default=_json_default)
-    run_dir = Path(run_dir)
+    path = Path(path)
+    run_dir = path.parent
     run_dir.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='\n',
-                                         prefix='.tracks.', suffix='.tmp',
+                                         prefix=f'.{path.stem}.', suffix='.tmp',
                                          dir=str(run_dir), delete=False) as handle:
             temporary = Path(handle.name)
             handle.write(serialized)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(str(temporary), str(run_dir/'tracks.json'))
+        os.replace(str(temporary), str(path))
         temporary = None
     finally:
         if temporary is not None:
