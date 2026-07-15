@@ -44,3 +44,30 @@ def test_invalid_cache_values_are_not_silently_coerced(tmp_path, fields):
     video = make_cache(tmp_path, **fields)
     with pytest.raises(ValueError, match='cache'):
         list(cached_centers(Capture(), tmp_path, video, max_frames=5))
+
+
+@pytest.mark.parametrize('overrides', [
+    {'config': None}, {'last_center_index': 2.5}, {'last_center_index': None},
+    {'completed': False}, {'partial': True}, {'output_frames': 8},
+])
+def test_invalid_or_partial_cache_metadata_is_rejected(tmp_path, overrides):
+    video = make_cache(tmp_path)
+    path = tmp_path / 'summary.json'
+    summary = json.loads(path.read_text(encoding='utf-8-sig'))
+    summary.update(overrides)
+    path.write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match='cache'):
+        list(cached_centers(Capture(), tmp_path, video, max_frames=5))
+
+
+def test_truncated_source_cannot_complete_cached_replay(tmp_path):
+    video = make_cache(tmp_path)
+    cap = Capture()
+    cap.count = 1  # Only four source frames remain, but center 2 needs frame 4.
+    with pytest.raises(ValueError, match='future-frame'):
+        list(cached_centers(cap, tmp_path, video, max_frames=5))
+
+
+def test_short_requested_prefix_still_has_no_fabricated_centers(tmp_path):
+    video = make_cache(tmp_path)
+    assert list(cached_centers(Capture(), tmp_path, video, max_frames=3)) == []

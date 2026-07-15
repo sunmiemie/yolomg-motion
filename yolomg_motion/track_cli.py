@@ -57,15 +57,27 @@ def draw_result(frame, result, frame_index, fps, zoom=False):
 
 def cached_centers(cap, cache, input_path, max_frames):
     summary = json.loads((cache/'summary.json').read_text(encoding='utf-8-sig'))
+    if not isinstance(summary, dict) or not isinstance(summary.get('input'), str):
+        raise ValueError('Motion cache metadata requires an input path')
+    if (summary.get('completed') is False or summary.get('partial') is True
+            or summary.get('status') in ('failed', 'interrupted')):
+        raise ValueError('Motion cache is incomplete; generate a complete cache before replay')
     if Path(summary['input']).resolve() != input_path.resolve():
         raise ValueError('Motion cache belongs to a different input video')
-    if summary.get('first_center_index') != 2 or summary.get('config', {}).get('frame_step') != 2:
+    config = summary.get('config')
+    if (type(summary.get('first_center_index')) is not int or summary['first_center_index'] != 2
+            or not isinstance(config, dict) or type(config.get('frame_step')) is not int
+            or config['frame_step'] != 2):
         raise ValueError('This adapter requires a complete k=2 motion cache starting at frame 2')
-    end = summary['last_center_index']
+    end = summary.get('last_center_index')
+    if type(end) is not int or end < 2:
+        raise ValueError('Motion cache last_center_index must be an integer at least 2')
+    if 'output_frames' in summary and summary['output_frames'] != end - 1:
+        raise ValueError('Motion cache output_frames disagrees with its center range')
     if max_frames:
         end = min(end, max_frames-3)
     index = 0
-    while not max_frames or index < max_frames:
+    while index <= end + 2 and (not max_frames or index < max_frames):
         ok, frame = cap.read()
         if not ok:
             break
@@ -84,6 +96,8 @@ def cached_centers(cap, cache, input_path, max_frames):
                 # Official training uses the unthresholded three-frame residual.
                 yield index, frame, difference.copy(), bool(success.item())
         index += 1
+    if index <= end + 2:
+        raise ValueError('Source video ended before the motion cache future-frame boundary')
 
 
 def calculated_centers(cap, max_frames, extractor=None, timings=None):
