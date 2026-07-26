@@ -116,6 +116,39 @@ def calculated_centers(cap, max_frames, extractor=None, timings=None):
             yield result.center_index, result.current, result.difference, result.success
 
 
+def validate_detection_cache(rows, summary):
+    """Validate replay observations before opening a video or creating output."""
+    if any(not isinstance(summary.get(key), str) or not summary[key]
+           for key in ('input', 'weights')):
+        raise ValueError('Detection cache requires input and weights paths')
+    if (summary.get('completed') is False or summary.get('partial') is True
+            or summary.get('status') in ('failed', 'interrupted')):
+        raise ValueError('Detection cache is incomplete')
+    if summary.get('output_frames', len(rows)) != len(rows):
+        raise ValueError('Detection cache output_frames disagrees with its rows')
+    for expected, row in enumerate(rows, 2):
+        if type(row.get('frame_index')) is not int or row['frame_index'] != expected:
+            raise ValueError('Detection cache needs consecutive center indices starting at 2')
+        if type(row.get('detector_ran')) is not bool or type(row.get('motion_valid')) is not bool:
+            raise ValueError('Detection cache observation flags must be booleans')
+        detections = row.get('detections')
+        if not row['detector_ran']:
+            if detections is not None:
+                raise ValueError('Detection cache has predictions without detector execution')
+            continue
+        if not row['motion_valid'] or not isinstance(detections, list):
+            raise ValueError('Detection cache requires valid motion and a prediction list')
+        for detection in detections:
+            if not isinstance(detection, dict):
+                raise ValueError('Detection cache predictions must be objects')
+            box, score = detection.get('bbox'), detection.get('confidence')
+            if (not isinstance(box, (list, tuple)) or len(box) != 4
+                    or any(type(v) not in (int, float) for v in box)
+                    or not np.isfinite(box).all() or box[2] <= box[0] or box[3] <= box[1]
+                    or type(score) not in (int, float) or not 0 <= score <= 1):
+                raise ValueError('Detection cache contains an invalid box or confidence')
+
+
 def main(argv=None):
     project = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -163,12 +196,16 @@ def main(argv=None):
     weights = args.weights or args.repo/'runs/train/ARD100_mask32-1280_uavs/weights/best.pt'
     detector, cached_detections, cached_summary = None, None, None
     if args.detection_cache:
-        cached_rows, cached_summary = read_tracking_run(args.detection_cache, strict_finite=True)
+        try:
+            cached_rows, cached_summary = read_tracking_run(args.detection_cache, strict_finite=True)
+            validate_detection_cache(cached_rows, cached_summary)
+        except (OSError, ValueError) as error:
+            parser.error(f'Invalid detection cache: {error}')
         if (Path(cached_summary['input']).resolve() != args.input.resolve()
                 or Path(cached_summary['weights']).resolve() != weights.resolve()
-                or cached_summary['model_input_size'] != args.image_size
-                or cached_summary['confidence_threshold'] != args.confidence
-                or cached_summary['detect_every'] != args.detect_every
+                or cached_summary.get('model_input_size') != args.image_size
+                or cached_summary.get('confidence_threshold') != args.confidence
+                or cached_summary.get('detect_every') != args.detect_every
                 or cached_summary.get('detector_backend', 'cpu') != args.device
                 or cached_summary.get('motion_backend', 'cpu') != args.motion_backend):
             parser.error('Detection cache input, model, or inference settings do not match')
