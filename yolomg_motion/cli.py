@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 from .core import MotionConfig, MotionExtractor
-from .run_artifacts import write_json_atomic
+from .run_artifacts import write_json_atomic, write_npz_atomic
 
 
 def write_image(path, data):
@@ -157,7 +157,7 @@ def main(argv=None):
                     write_image(args.output/f'comparison_{result.center_index:06d}.png', panel)
             if args.save_maps:
                 stem = args.output/'maps'/f'{result.center_index:06d}'
-                np.savez_compressed(str(stem)+'.npz', difference=result.difference,
+                write_npz_atomic(str(stem)+'.npz', difference=result.difference,
                                     motion=result.motion, valid_mask=result.valid_mask,
                                     center_index=np.int64(result.center_index), success=np.bool_(result.success))
                 write_image(str(stem)+'.png', np.rint(result.motion).clip(0, 255).astype(np.uint8))

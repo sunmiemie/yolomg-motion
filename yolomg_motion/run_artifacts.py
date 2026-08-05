@@ -101,3 +101,24 @@ def write_json_atomic(path, payload):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def write_npz_atomic(path, **arrays):
+    """Publish a complete motion cache archive, retaining the old file on error."""
+    import numpy as np
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f'.{path.stem}.',
+                                         suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            np.savez_compressed(stream, **arrays)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
