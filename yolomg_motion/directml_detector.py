@@ -64,6 +64,19 @@ def _executed_provider_counts(profile_path):
     return dict(counts)
 
 
+def _vendor_source_digest(repo_dir):
+    """Fingerprint all model and utility Python code used during export."""
+    root = Path(repo_dir)
+    digest = sha256()
+    for directory in ('models', 'utils'):
+        for path in sorted((root / directory).rglob('*.py')):
+            name = path.relative_to(root).as_posix().encode('utf-8')
+            digest.update(len(name).to_bytes(4, 'big'))
+            digest.update(name)
+            digest.update(bytes.fromhex(_file_digest(path)))
+    return digest.hexdigest()
+
+
 class DirectMLYOLOMGDetector(YOLOMGDetector):
     def __init__(
         self, repo_dir, weights, image_size=1280, conf_threshold=0.1,
@@ -85,10 +98,7 @@ class DirectMLYOLOMGDetector(YOLOMGDetector):
             Path(__file__).resolve().parents[1] / ".cache" / "onnx"
         )
         self._weight_sha = _file_digest(self.weights)
-        self._source_sha = sha256("".join(
-            _file_digest(self.repo_dir / name)
-            for name in ("models/yolo.py", "models/common.py")
-        ).encode()).hexdigest()
+        self._source_sha = _vendor_source_digest(self.repo_dir)
         self._session = None
         self._session_shape = None
         self.backend_info = {
