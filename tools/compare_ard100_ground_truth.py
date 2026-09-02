@@ -21,8 +21,28 @@ if str(PROJECT_ROOT) not in sys.path:
 from yolomg_motion.run_artifacts import read_tracking_run
 
 
+def _valid_box(box):
+    try:
+        value = np.asarray(box, dtype=float)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError('Expected a finite positive-area xyxy box') from error
+    if value.shape != (4,) or not np.isfinite(value).all() or np.any(value[2:] <= value[:2]):
+        raise ValueError('Expected a finite positive-area xyxy box')
+    return value
+
+
+def _thresholds(confidence, iou_threshold):
+    if (isinstance(confidence, bool) or isinstance(iou_threshold, bool)
+            or not 0 <= confidence <= 1 or not 0 < iou_threshold <= 1):
+        raise ValueError('Confidence must be in [0,1] and IoU threshold in (0,1]')
+
+
 def box_iou(first, second):
-    a, b = np.asarray(first, dtype=float), np.asarray(second, dtype=float)
+    a, b = _valid_box(first), _valid_box(second)
+    # Scale before multiplication so large finite coordinates cannot overflow
+    # the intersection/union into an invalid metric.
+    scale = max(float(np.abs(a).max()), float(np.abs(b).max()))
+    a, b = a / scale, b / scale
     intersection = np.maximum(0, np.minimum(a[2:], b[2:]) - np.maximum(a[:2], b[:2])).prod()
     area_a = np.maximum(0, a[2:] - a[:2]).prod()
     area_b = np.maximum(0, b[2:] - b[:2]).prod()
@@ -57,14 +77,23 @@ def read_annotation(archive, sequence, frame_index, offset=-1.0):
 
 def match_detections(detections, ground_truth, confidence=0.1, iou_threshold=0.5):
     """Confidence-ordered greedy one-to-one matches at one operating point."""
-    eligible = [d for d in (detections or []) if float(d['confidence']) >= confidence]
+    _thresholds(confidence, iou_threshold)
+    ground_truth = [_valid_box(box) for box in ground_truth]
+    eligible = []
+    for detection in detections or []:
+        if (not isinstance(detection, dict) or type(detection.get('confidence')) not in (int, float)
+                or not 0 <= detection['confidence'] <= 1):
+            raise ValueError('Prediction confidence must be a finite number in [0,1]')
+        _valid_box(detection.get('bbox'))
+        if detection['confidence'] >= confidence:
+            eligible.append(detection)
     eligible.sort(key=lambda d: float(d['confidence']), reverse=True)
     unmatched = set(range(len(ground_truth)))
     matches, false_positives = [], 0
     for detection in eligible:
         overlaps = [(box_iou(detection['bbox'], ground_truth[index]), index)
                     for index in unmatched]
-        best_iou, best_index = max(overlaps, default=(0.0, None))
+        best_iou, best_index = max(overlaps, key=lambda item: (item[0], -item[1]), default=(0.0, None))
         if best_index is not None and best_iou >= iou_threshold:
             unmatched.remove(best_index)
             matches.append(dict(gt_index=best_index, iou=best_iou,
@@ -77,6 +106,7 @@ def match_detections(detections, ground_truth, confidence=0.1, iou_threshold=0.5
 
 def evaluate_rows(rows, annotations, confidence=0.1, iou_threshold=0.5):
     """Exclude missing XML from all GT-based denominators and detection counts."""
+    _thresholds(confidence, iou_threshold)
     counts = dict(run_frames=len(rows), annotated_frames=0, missing_annotations=0,
                   gt_positive_frames=0, gt_negative_frames=0, gt_objects=0,
                   difficult_drone_objects_ignored=0, locked_correct_frames=0,
