@@ -52,24 +52,43 @@ def box_iou(first, second):
 
 def read_annotation(archive, sequence, frame_index, offset=-1.0):
     """Map zero-based source index to one-based VOC name; absence is None."""
+    if (not isinstance(sequence, str) or not sequence or '/' in sequence or '\\' in sequence
+            or sequence in ('.', '..')):
+        raise ValueError('Sequence must be a single nonempty archive name')
+    if type(frame_index) is not int or frame_index < 0:
+        raise ValueError('frame_index must be a nonnegative integer')
+    if type(offset) not in (int, float) or not np.isfinite(offset):
+        raise ValueError('Annotation offset must be finite')
     member = f'annotations/{sequence}/{sequence}_{frame_index + 1:04d}.xml'
     try:
         payload = archive.read(member)
     except KeyError:
         return None
-    root = ET.fromstring(payload)
-    width, height = int(root.findtext('size/width')), int(root.findtext('size/height'))
+    try:
+        root = ET.fromstring(payload)
+        width, height = int(root.findtext('size/width')), int(root.findtext('size/height'))
+        if width <= 0 or height <= 0:
+            raise ValueError('image dimensions must be positive')
+    except (ET.ParseError, TypeError, ValueError) as error:
+        raise ValueError(f'Invalid annotation {member}: {error}') from error
     boxes, ignored = [], 0
     for item in root.findall('object'):
         if item.findtext('name', '').strip().lower() != 'drone':
             continue
-        if int(item.findtext('difficult', '0')) != 0:
+        difficulty = item.findtext('difficult', '0').strip()
+        if difficulty not in ('0', '1'):
+            raise ValueError(f'Invalid difficult flag in {member}: {difficulty}')
+        if difficulty == '1':
             ignored += 1
             continue
-        box = tuple(float(item.findtext('bndbox/' + key)) + offset
-                    for key in ('xmin', 'ymin', 'xmax', 'ymax'))
-        if not np.isfinite(box).all() or box[2] <= box[0] or box[3] <= box[1]:
-            raise ValueError(f'Invalid Drone box in {member}: {box}')
+        try:
+            box = tuple(float(item.findtext('bndbox/' + key)) + offset
+                        for key in ('xmin', 'ymin', 'xmax', 'ymax'))
+            _valid_box(box)
+            if box[0] < 0 or box[1] < 0 or box[2] > width or box[3] > height:
+                raise ValueError('box is outside the declared image dimensions')
+        except (TypeError, ValueError) as error:
+            raise ValueError(f'Invalid Drone box in {member}: {error}') from error
         boxes.append(box)
     return dict(member=member, width=width, height=height,
                 boxes=boxes, difficult_drone_objects_ignored=ignored)
