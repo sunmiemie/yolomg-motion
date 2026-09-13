@@ -71,16 +71,13 @@ def read_annotation(archive, sequence, frame_index, offset=-1.0):
             raise ValueError('image dimensions must be positive')
     except (ET.ParseError, TypeError, ValueError) as error:
         raise ValueError(f'Invalid annotation {member}: {error}') from error
-    boxes, ignored = [], 0
+    boxes, ignored_boxes = [], []
     for item in root.findall('object'):
         if item.findtext('name', '').strip().lower() != 'drone':
             continue
         difficulty = item.findtext('difficult', '0').strip()
         if difficulty not in ('0', '1'):
             raise ValueError(f'Invalid difficult flag in {member}: {difficulty}')
-        if difficulty == '1':
-            ignored += 1
-            continue
         try:
             box = tuple(float(item.findtext('bndbox/' + key)) + offset
                         for key in ('xmin', 'ymin', 'xmax', 'ymax'))
@@ -89,15 +86,17 @@ def read_annotation(archive, sequence, frame_index, offset=-1.0):
                 raise ValueError('box is outside the declared image dimensions')
         except (TypeError, ValueError) as error:
             raise ValueError(f'Invalid Drone box in {member}: {error}') from error
-        boxes.append(box)
+        (ignored_boxes if difficulty == '1' else boxes).append(box)
     return dict(member=member, width=width, height=height,
-                boxes=boxes, difficult_drone_objects_ignored=ignored)
+                boxes=boxes, ignored_boxes=ignored_boxes,
+                difficult_drone_objects_ignored=len(ignored_boxes))
 
 
-def match_detections(detections, ground_truth, confidence=0.1, iou_threshold=0.5):
+def match_detections(detections, ground_truth, confidence=0.1, iou_threshold=0.5, ignored_boxes=()):
     """Confidence-ordered greedy one-to-one matches at one operating point."""
     _thresholds(confidence, iou_threshold)
     ground_truth = [_valid_box(box) for box in ground_truth]
+    ignored_boxes = [_valid_box(box) for box in ignored_boxes]
     eligible = []
     for detection in detections or []:
         if (not isinstance(detection, dict) or type(detection.get('confidence')) not in (int, float)
@@ -108,7 +107,7 @@ def match_detections(detections, ground_truth, confidence=0.1, iou_threshold=0.5
             eligible.append(detection)
     eligible.sort(key=lambda d: float(d['confidence']), reverse=True)
     unmatched = set(range(len(ground_truth)))
-    matches, false_positives = [], 0
+    matches, false_positives, ignored_predictions = [], 0, 0
     for detection in eligible:
         overlaps = [(box_iou(detection['bbox'], ground_truth[index]), index)
                     for index in unmatched]
@@ -117,22 +116,25 @@ def match_detections(detections, ground_truth, confidence=0.1, iou_threshold=0.5
             unmatched.remove(best_index)
             matches.append(dict(gt_index=best_index, iou=best_iou,
                                 confidence=float(detection['confidence'])))
+        elif any(box_iou(detection['bbox'], box) >= iou_threshold for box in ignored_boxes):
+            ignored_predictions += 1
         else:
             false_positives += 1
     return dict(tp=len(matches), fp=false_positives, fn=len(unmatched),
-                eligible_predictions=len(eligible), matches=matches)
+                eligible_predictions=len(eligible), ignored_predictions=ignored_predictions, matches=matches)
 
 
 def evaluate_rows(rows, annotations, confidence=0.1, iou_threshold=0.5):
     """Exclude missing XML from all GT-based denominators and detection counts."""
     _thresholds(confidence, iou_threshold)
     counts = dict(run_frames=len(rows), annotated_frames=0, missing_annotations=0,
-                  gt_positive_frames=0, gt_negative_frames=0, gt_objects=0,
+                  gt_positive_frames=0, gt_negative_frames=0, ignored_only_frames=0, gt_objects=0,
                   difficult_drone_objects_ignored=0, locked_correct_frames=0,
-                  locked_wrong_frames=0, locked_wrong_on_gt_frames=0,
+                  locked_wrong_frames=0, locked_wrong_on_gt_frames=0, locked_ignored_frames=0,
                   locked_on_negative_frames=0, missed_tracking_frames=0,
                   gt_frames_without_correct_lock=0, detector_evaluated_frames=0,
-                  detector_gt_objects=0, detector_tp=0, detector_fp=0, detector_fn=0)
+                  detector_gt_objects=0, detector_tp=0, detector_fp=0, detector_fn=0,
+                  detector_ignored_predictions=0)
     per_frame, iou_sum = [], 0.0
     for row in rows:
         index = row['frame_index']
@@ -142,14 +144,19 @@ def evaluate_rows(rows, annotations, confidence=0.1, iou_threshold=0.5):
             per_frame.append(dict(frame_index=index, evaluation_status='missing_annotation'))
             continue
         boxes = annotation['boxes']
+        ignored_boxes = annotation.get('ignored_boxes', [])
         counts['annotated_frames'] += 1
-        counts['gt_positive_frames' if boxes else 'gt_negative_frames'] += 1
+        counts['gt_positive_frames' if boxes else 'ignored_only_frames' if ignored_boxes else 'gt_negative_frames'] += 1
         counts['gt_objects'] += len(boxes)
         counts['difficult_drone_objects_ignored'] += annotation['difficult_drone_objects_ignored']
         prediction = row.get('bbox') if row.get('state') == 'LOCKED' else None
         best_iou = max((box_iou(prediction, gt) for gt in boxes), default=0.0) if prediction is not None else 0.0
         correct = prediction is not None and bool(boxes) and best_iou >= iou_threshold
-        if prediction is not None:
+        ignored_lock = (prediction is not None and not correct and
+                        any(box_iou(prediction, box) >= iou_threshold for box in ignored_boxes))
+        if ignored_lock:
+            counts['locked_ignored_frames'] += 1
+        elif prediction is not None:
             counts['locked_correct_frames' if correct else 'locked_wrong_frames'] += 1
             if not correct:
                 counts['locked_wrong_on_gt_frames' if boxes else 'locked_on_negative_frames'] += 1
@@ -161,13 +168,14 @@ def evaluate_rows(rows, annotations, confidence=0.1, iou_threshold=0.5):
         record = dict(frame_index=index, annotation_member=annotation['member'],
                       evaluation_status='evaluated', gt_boxes=boxes,
                       locked_bbox=prediction, best_locked_iou=best_iou,
-                      correct_locked_frame=bool(correct))
+                      correct_locked_frame=bool(correct), ignored_locked_frame=bool(ignored_lock))
         if row.get('detector_ran'):
             if row.get('detections') is None:
                 raise ValueError(f'detector_ran is true but detections is null at frame {index}')
-            detection = match_detections(row['detections'], boxes, confidence, iou_threshold)
+            detection = match_detections(row['detections'], boxes, confidence, iou_threshold, ignored_boxes)
             counts['detector_evaluated_frames'] += 1
             counts['detector_gt_objects'] += len(boxes)
+            counts['detector_ignored_predictions'] += detection['ignored_predictions']
             for key in ('tp', 'fp', 'fn'):
                 counts['detector_' + key] += detection[key]
             record['detection'] = detection
@@ -327,7 +335,7 @@ def main(argv=None):
         prediction_source='Existing tracks.json only; GT never used to select, initialize, or update predictions.',
         iou_threshold=0.5, detection_confidence_threshold=0.1,
         matching='Confidence-ordered greedy one-to-one IoU matching on detector_ran frames only.',
-        difficult_policy='Only Drone objects with difficult=0 are scored; ignored object count is reported.',
+        difficult_policy='Eligible Drone matches take priority. Otherwise predictions overlapping difficult Drone boxes at IoU>=0.5 are ignored, not false positives. Difficult objects never add false negatives.',
         missing_annotation_policy='Missing XML excluded from GT metrics and detection TP/FP/FN; missing count reported.',
         tracking_definitions='Correct: LOCKED with IoU>=0.5 against any eligible GT. Wrong: LOCKED without a match. Missed: eligible GT but no LOCKED box; wrong and missed are disjoint. Mean IoU uses all GT-positive frames, with unlocked frames scored zero.',
         limitations='Fixed-threshold precision/recall, NOT AP. This evaluates only the recorded run frames of one sequence, NOT the full 35-sequence test benchmark. GT-centered zoom is for display only.',
