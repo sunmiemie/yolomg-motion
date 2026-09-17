@@ -1,0 +1,4 @@
+# Optional Windows DirectML inference environment, verified with Python 3.9.
+# Install in .venv-gpu (with --system-site-packages) so the CPU environment stays intact.
+onnx==1.17.0
+onnxruntime-directml==1.19.2

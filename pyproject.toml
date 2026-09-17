@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yolomg-motion"
+version = "0.1.0"
+description = "YOLOMG sparse optical-flow motion features and automatic drone tracking"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.23", "opencv-python>=4.8"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+yolomg-motion = "yolomg_motion.cli:main"
+yolomg-track = "yolomg_motion.track_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["yolomg_motion*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
