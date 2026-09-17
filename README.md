@@ -2,6 +2,8 @@
 
 首次克隆后的安装、权重下载与代码来源见 [REPOSITORY.md](REPOSITORY.md)。视频、测试集、模型权重与运行结果不随 Git 仓库上传。
 
+当前功能分支加入“首次检测锁定后仅 ROI 跟踪、失锁后重检测”：见 [ROI_TRACKING.md](ROI_TRACKING.md)。入口为 `run_roi_gpu.ps1` 或 `python -m yolomg_motion.roi_cli`。目标板卡 ATK-DLRK3588 的 2K60 属于待实测目标，当前不能宣称已达到板端 60 FPS。
+
 本项目独立实现 YOLOMG 论文第 III-A 节的运动特征增强模块（MFEM）：高斯平滑与灰度化、网格采样、稀疏金字塔 Lucas–Kanade（LK）光流跟踪、RANSAC 单应矩阵估计、摄像头运动补偿、三帧差分，以及可调的形态学处理。运动模块由本项目实现；新增的检测模块使用 `vendor/YOLOMG` 中的作者源码和官方 1280 预训练权重，保留其 GPL-3.0 许可证和来源校验记录。
 
 原有 `python -m yolomg_motion` 命令仍只输出配准与运动差分，运行只需 NumPy 和 OpenCV。新增 `python -m yolomg_motion.track_cli` 将原始彩色图和三帧差分输入官方 YOLOMG 网络，再用时序关联与局部模板匹配锁定目标，输出带黄色框的视频。检测需要 PyTorch 和预训练权重，支持 CPU。跟踪是本项目增加的功能，不属于论文原有检测网络，也没有重新训练模型。输入视频和输出图像均在本机处理，程序不会上传原图或视频。

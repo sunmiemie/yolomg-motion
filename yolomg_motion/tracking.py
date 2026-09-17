@@ -1,8 +1,9 @@
 """Conservative single-target tracking between intermittent detector updates.
 
 Only detector observations can create or confirm an identity. Local normalized
-cross-correlation can bridge short detector gaps, but cannot extend a track
-beyond ``max_detector_gap`` source frames. This is a tracking utility, not a
+cross-correlation normally bridges short detector gaps. The opt-in ROI pipeline
+uses ``max_detector_gap=None`` for loss-triggered reacquisition instead of a
+fixed expiry. This is a tracking utility, not a
 drone classifier and not a component claimed by the YOLOMG paper.
 """
 from dataclasses import dataclass
@@ -52,7 +53,9 @@ class SingleTargetTracker:
     are different quantities. LOST results never contain a predicted box.
 
     ``max_detector_gap`` is measured in the caller's source frame indices,
-    not update call count. The tracking patch can be larger than a tiny box;
+    not update call count; None explicitly disables detector-age expiry.
+    ``roi_only=True`` converts only the small template/search crop to grayscale.
+    The tracking patch can be larger than a tiny box;
     returned boxes always preserve the detector's target size.
     """
 
@@ -60,20 +63,26 @@ class SingleTargetTracker:
                  search_radius=32, min_confidence=0.2,
                  appearance_threshold=0.65, max_size_ratio=2.0,
                  min_template_width=24, min_template_height=16,
-                 min_template_std=2.0, backend='cpu'):
+                 min_template_std=2.0, backend='cpu', roi_only=False, template_padding=12):
         from .opencl_motion import backend_information
         self.backend = backend
         self.backend_info = backend_information(backend)
-        if confirmations < 1 or max_detector_gap < 1:
+        if confirmations < 1 or (max_detector_gap is not None and max_detector_gap < 1):
             raise ValueError('confirmations and max_detector_gap must be positive')
+        if roi_only and backend != 'cpu':
+            raise ValueError('ROI-only preprocessing currently requires the CPU tracking backend')
         if search_radius < 1 or min_template_width < 2 or min_template_height < 2:
             raise ValueError('Search radius and template dimensions must be positive')
         if not 0 <= min_confidence <= 1 or not 0 < appearance_threshold <= 1:
             raise ValueError('Confidence thresholds must be in their valid ranges')
         if max_size_ratio < 1 or min_template_std <= 0:
             raise ValueError('Invalid size-ratio or template-variance threshold')
+        if template_padding < 0:
+            raise ValueError('template_padding must be nonnegative')
         self.confirmations = int(confirmations)
-        self.max_detector_gap = int(max_detector_gap)
+        self.max_detector_gap = int(max_detector_gap) if max_detector_gap is not None else None
+        self.roi_only = bool(roi_only)
+        self.template_padding = int(template_padding)
         self.search_radius = int(search_radius)
         self.min_confidence = float(min_confidence)
         self.appearance_threshold = float(appearance_threshold)
@@ -98,6 +107,23 @@ class SingleTargetTracker:
         self._template = None
         self._template_gpu = None
         self._template_offset = None
+        self.last_search_roi = None
+
+    @property
+    def state(self):
+        return self._state
+
+    @property
+    def last_detection_index(self):
+        return self._last_detection_index
+
+    def invalidate(self):
+        """Discard visual lock after an explicit failed detector verification."""
+        return self._lose()
+
+    @staticmethod
+    def _gray_patch(image):
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
 
     def _valid_detections(self, detections, width, height):
         valid = []
@@ -152,10 +178,10 @@ class SingleTargetTracker:
         self._last_box_index = frame_index
 
     def _set_template(self, gray):
-        height, width = self._frame_shape[:2] if self.backend == 'opencl' else gray.shape
+        height, width = self._frame_shape[:2]
         box_width, box_height = _size(self._bbox)
-        patch_width = min(width, max(self.min_template_width, int(np.ceil(box_width)) + 12))
-        patch_height = min(height, max(self.min_template_height, int(np.ceil(box_height)) + 12))
+        patch_width = min(width, max(self.min_template_width, int(np.ceil(box_width)) + self.template_padding))
+        patch_height = min(height, max(self.min_template_height, int(np.ceil(box_height)) + self.template_padding))
         center = _center(self._bbox)
         left = int(np.clip(np.floor(center[0] - patch_width / 2), 0, width - patch_width))
         top = int(np.clip(np.floor(center[1] - patch_height / 2), 0, height - patch_height))
@@ -163,7 +189,7 @@ class SingleTargetTracker:
             patch = cv2.UMat(gray, (left, top, patch_width, patch_height))
             template = patch.get()
         else:
-            template = gray[top:top + patch_height, left:left + patch_width].copy()
+            template = self._gray_patch(gray[top:top + patch_height, left:left + patch_width]).copy()
         if float(template.std()) < self.min_template_std:
             self._template = None
             self._template_gpu = None
@@ -177,7 +203,7 @@ class SingleTargetTracker:
     def _match_template(self, gray, predicted):
         if self._template is None:
             return None, None
-        height, width = self._frame_shape[:2] if self.backend == 'opencl' else gray.shape
+        height, width = self._frame_shape[:2]
         th, tw = self._template.shape
         expected = _center(predicted) - self._template_offset
         radius = self.search_radius
@@ -187,11 +213,12 @@ class SingleTargetTracker:
         bottom = min(height, int(np.ceil(expected[1] + th + radius)))
         if right - left < tw or bottom - top < th:
             return None, None
+        self.last_search_roi = (left, top, right, bottom)
         if self.backend == 'opencl':
             search = cv2.UMat(gray, (left, top, right-left, bottom-top))
             scores = cv2.matchTemplate(search, self._template_gpu, cv2.TM_CCOEFF_NORMED).get()
         else:
-            search = gray[top:bottom, left:right]
+            search = self._gray_patch(gray[top:bottom, left:right])
             scores = cv2.matchTemplate(search, self._template, cv2.TM_CCOEFF_NORMED)
         scores[~np.isfinite(scores)] = -1
         _, score, _, location = cv2.minMaxLoc(scores)
@@ -257,12 +284,13 @@ class SingleTargetTracker:
             raise ValueError('Frame shape changed; call reset for a new sequence')
         self._frame_shape = frame.shape
         self._last_frame_index = int(frame_index)
+        self.last_search_roi = None
         if self.backend == 'opencl':
             from .opencl_motion import ensure_opencl_enabled
             ensure_opencl_enabled()
             gray = cv2.cvtColor(cv2.UMat(frame), cv2.COLOR_BGR2GRAY)
         else:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = frame if self.roi_only else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         eligible = None if detections is None else self._valid_detections(
             detections, frame.shape[1], frame.shape[0])
 
@@ -273,7 +301,7 @@ class SingleTargetTracker:
 
         # A time gap invalidates the old identity even if a new detection is
         # now present. Reacquisition must earn fresh confirmations.
-        if frame_index - self._last_detection_index > self.max_detector_gap:
+        if self.max_detector_gap is not None and frame_index - self._last_detection_index > self.max_detector_gap:
             if eligible:
                 self._lose()
                 return self._start_candidate(gray, max(eligible, key=lambda item: item.confidence), frame_index)

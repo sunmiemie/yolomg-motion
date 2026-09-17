@@ -15,6 +15,7 @@ test = ["pytest>=7"]
 [project.scripts]
 yolomg-motion = "yolomg_motion.cli:main"
 yolomg-track = "yolomg_motion.track_cli:main"
+yolomg-roi = "yolomg_motion.roi_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["yolomg_motion*"]

@@ -103,13 +103,25 @@ def audit_run(run_dir):
     except (OSError, ValueError) as exc:
         errors.append(f'Tracking JSON: {exc}')
         tracks, summary = [], {}
-    video_names = ['tracked_zoom.mp4']
+    roi_pipeline = summary.get('pipeline') == 'detect_then_roi'
+    headless = roi_pipeline and summary.get('video_enabled') is False
+    video_names = [] if headless else ['tracked_zoom.mp4']
     if (run_dir/'tracked.mp4').exists():
         video_names.append('tracked.mp4')
     videos = {name: decode_video(run_dir/name, errors, warnings)
               for name in video_names}
-    primary = videos['tracked_zoom.mp4']
-    width, height = primary['width'], primary['height']
+    if headless:
+        dimensions = summary.get('input_dimensions')
+        if not isinstance(dimensions, list) or len(dimensions) != 2 or not all(_integer(v) and v > 0 for v in dimensions):
+            errors.append('Run metadata: headless ROI run requires valid input_dimensions')
+            width, height = None, None
+        else:
+            width, height = dimensions
+        if summary.get('video_frames_written') != 0:
+            errors.append('Run metadata: headless run cannot claim written video frames')
+    else:
+        primary = videos['tracked_zoom.mp4']
+        width, height = primary['width'], primary['height']
     fps = summary.get('input_fps')
     if not _number(fps) or fps <= 0:
         errors.append('Run metadata: input_fps must be finite and positive')
@@ -131,7 +143,7 @@ def audit_run(run_dir):
     previous_locked_id = None
     seen_ids, last_episode_id, episodes = set(), None, []
     states, sources, locked_sources = Counter(), Counter(), Counter()
-    locked_frames = detector_calls = motion_invalid_frames = 0
+    locked_frames = detector_calls = motion_invalid_frames = motion_skipped_frames = 0
     for position, raw in enumerate(tracks):
         label = f'tracks.json row {position}'
         if not isinstance(raw, dict):
@@ -206,9 +218,17 @@ def audit_run(run_dir):
         if _number(value) and not 0 <= value <= 1:
             errors.append(f'{label}: detector_confidence must lie in [0, 1]')
         ran, valid = raw.get('detector_ran'), raw.get('motion_valid')
-        for key in ('detector_ran', 'motion_valid'):
-            if not isinstance(raw.get(key), bool):
-                errors.append(f'{label}: {key} must be boolean')
+        if not isinstance(ran, bool):
+            errors.append(f'{label}: detector_ran must be boolean')
+        skipped = roi_pipeline and raw.get('motion_computed') is False
+        if roi_pipeline and not isinstance(raw.get('motion_computed'), bool):
+            errors.append(f'{label}: motion_computed must be boolean')
+        if skipped:
+            motion_skipped_frames += 1
+            if valid is not None or ran is not False:
+                errors.append(f'{label}: skipped motion requires null motion_valid and no detector execution')
+        elif not isinstance(valid, bool):
+            errors.append(f'{label}: motion_valid must be boolean for computed motion')
         detector_calls += ran is True
         motion_invalid_frames += valid is False
         if ran is True and valid is not True:
@@ -254,6 +274,7 @@ def audit_run(run_dir):
                 locked_frames=locked_frames, unlocked_frames=len(tracks)-locked_frames,
                 lock_fraction=locked_frames/len(tracks) if tracks else 0.,
                 detector_calls=detector_calls, motion_invalid_frames=motion_invalid_frames,
+                motion_skipped_frames=motion_skipped_frames,
                 track_ids=sorted(seen_ids), track_episodes=episodes, unlocked_intervals=unlocked,
                 longest_unlocked_frames=max((span['frame_count'] for span in unlocked), default=0),
                 note='Structural and complete-video-decode verification only. Lock coverage is not detection accuracy. '
