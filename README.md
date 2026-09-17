@@ -20,12 +20,12 @@ python -m yolomg_motion.track_cli --input 'D:/Users/Desktop/bxk/视频/72ebd2031
 
 ## 快速运行
 
-项目目录为 `D:/Users/Desktop/bxk/yolomg_motion`。运行需要 Python 3.9 或以上，以及 NumPy 和 OpenCV。项目声明的依赖为 `numpy>=1.23`、`opencv-python>=4.8`；测试额外需要 `pytest>=7`。现有 Python 环境已经能够导入 `cv2` 和 `numpy` 时，可以直接从项目目录运行，无需安装本项目或修改其他工程。
+项目目录为 `D:/Users/Desktop/bxk/small/yolomg_motion`。运行需要 Python 3.9 或以上，以及 NumPy 和 OpenCV。项目声明的依赖为 `numpy>=1.23`、`opencv-python>=4.8`；测试额外需要 `pytest>=7`。现有 Python 环境已经能够导入 `cv2` 和 `numpy` 时，可以直接从项目目录运行，无需安装本项目或修改其他工程。
 
 PowerShell 示例：
 
 ```powershell
-Set-Location 'D:/Users/Desktop/bxk/yolomg_motion'
+Set-Location 'D:/Users/Desktop/bxk/small/yolomg_motion'
 python -m yolomg_motion --input 'D:/Users/Desktop/bxk/视频/72ebd203198e372d6b64af2d4fb9531e.mp4' --output runs/demo --max-frames 120 --save-video --save-maps
 ```
 

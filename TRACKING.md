@@ -15,7 +15,7 @@
 本机 Python：`C:/dev/python/python.exe`，PyTorch 2.8.0+cpu、torchvision 0.23.0。CPU 可运行，实际速度见各次 `tracks.json` 的 `metadata`。现有环境已具备依赖；新环境需要基础项目依赖及 `requirements-detection.txt`。
 
 ```powershell
-Set-Location 'D:/Users/Desktop/bxk/yolomg_motion'
+Set-Location 'D:/Users/Desktop/bxk/small/yolomg_motion'
 python -m yolomg_motion.track_cli --input 'D:/Users/Desktop/bxk/视频/72ebd203198e372d6b64af2d4fb9531e.mp4' --output runs/auto_tracking --lock-confidence 0.10 --max-detector-gap 90
 ```
 

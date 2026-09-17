@@ -23,7 +23,7 @@
 
 ## 运行命令
 
-在 `D:/Users/Desktop/bxk/yolomg_motion` 中：
+在 `D:/Users/Desktop/bxk/small/yolomg_motion` 中：
 
 ```powershell
 python -m yolomg_motion.track_cli --input datasets/ard100_public/ARD100/test_videos/phantom02.mp4 --output runs/ard100_phantom02_20260911 --image-size 1280 --confidence 0.10 --lock-confidence 0.10 --detect-every 3 --max-detector-gap 90 --threads 4
