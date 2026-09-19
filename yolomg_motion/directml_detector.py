@@ -14,7 +14,7 @@ import tempfile
 
 import numpy as np
 
-from .yolo_detector import YOLOMGDetector
+from .yolo_detector import YOLOMGDetector, validate_model_options
 
 
 EXPORT_VERSION = "yolomg-dual-fp32-v1-opset13"
@@ -82,6 +82,7 @@ class DirectMLYOLOMGDetector(YOLOMGDetector):
         self, repo_dir, weights, image_size=1280, conf_threshold=0.1,
         threads=4, device_id=0, cache_dir=None,
     ):
+        validate_model_options(image_size, conf_threshold, 0.45, threads)
         if isinstance(device_id, bool) or not isinstance(device_id, int) or device_id < 0:
             raise ValueError("DirectML device_id must be a nonnegative adapter index")
         self._onnx, self._ort = _dependencies()

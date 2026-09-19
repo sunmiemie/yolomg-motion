@@ -6,6 +6,7 @@ are intentionally replaced with the requested device and actual frame size.
 """
 
 from dataclasses import dataclass
+from numbers import Integral, Real
 from pathlib import Path
 import sys
 from time import perf_counter
@@ -20,6 +21,15 @@ class Detection:
     bbox_xyxy: Tuple[float, float, float, float]
     confidence: float
     class_id: int
+
+
+def validate_model_options(image_size, conf_threshold, iou_threshold, threads):
+    for name, value, minimum in (('image_size', image_size, 32), ('threads', threads, 1)):
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
+            raise ValueError(f'{name} must be an integer at least {minimum}')
+    for name, value in (('confidence', conf_threshold), ('IoU', iou_threshold)):
+        if isinstance(value, bool) or not isinstance(value, Real) or not 0 < value <= 1:
+            raise ValueError(f'{name} threshold must be a finite number in (0,1]')
 
 
 class YOLOMGDetector:
@@ -42,18 +52,14 @@ class YOLOMGDetector:
         iou_threshold=0.45,
         threads=4,
     ):
-        import torch
-
+        validate_model_options(image_size, conf_threshold, iou_threshold, threads)
         self.repo_dir = Path(repo_dir).resolve()
         self.weights = Path(weights).resolve()
         if not (self.repo_dir / "models" / "yolo.py").is_file():
             raise FileNotFoundError(f"Official YOLOMG source not found: {self.repo_dir}")
         if not self.weights.is_file():
             raise FileNotFoundError(f"YOLOMG checkpoint not found: {self.weights}")
-        if not 0 < conf_threshold <= 1 or not 0 < iou_threshold <= 1:
-            raise ValueError("Confidence and IoU thresholds must be in (0, 1]")
-        if image_size < 32 or threads < 1:
-            raise ValueError("image_size must be >= 32 and threads must be positive")
+        import torch
 
         # Original checkpoints reference the top-level modules models.* and
         # utils.*. Refuse to silently bind those names to another YOLO fork.
