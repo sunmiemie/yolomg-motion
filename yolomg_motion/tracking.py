@@ -117,6 +117,19 @@ class SingleTargetTracker:
     def last_detection_index(self):
         return self._last_detection_index
 
+    def predicted_box(self, frame_index):
+        """Read the next search location without advancing or confirming a track.
+
+        The returned box is a proposal only, never an observed target position.
+        """
+        if not isinstance(frame_index, (int, np.integer)) or frame_index < 0:
+            raise ValueError('frame_index must be a nonnegative integer')
+        if self._bbox is None or self._state not in ('LOCKED', 'CONFIRMING'):
+            return None
+        if frame_index < self._last_box_index:
+            raise ValueError('Cannot predict before the last observation')
+        return self._predicted_box(frame_index)
+
     def invalidate(self):
         """Discard visual lock after an explicit failed detector verification."""
         return self._lose()

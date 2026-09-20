@@ -4,6 +4,10 @@
 
 当前功能分支加入“首次检测锁定后仅 ROI 跟踪、失锁后重检测”：见 [ROI_TRACKING.md](ROI_TRACKING.md)。入口为 `run_roi_gpu.ps1` 或 `python -m yolomg_motion.roi_cli`。目标板卡 ATK-DLRK3588 的 2K60 属于待实测目标，当前不能宣称已达到板端 60 FPS。
 
+新增可选的 **原图 ROI 放大检测**：见 [ROI_ZOOM.md](ROI_ZOOM.md)。入口为 `run_roi_zoom_gpu.ps1` 或 `python -m yolomg_motion.roi_cli --pipeline zoom`；先产生候选窗口，再裁剪原图、同步放大 RGB 和运动图送入 YOLOMG，默认每 10 帧检测、每次最多 2 个窗口、网络输入 640。已有模板跟踪入口及默认行为保持不变。
+
+可选的 **短时运动预测与轨迹显示** 见 [MOTION_PREDICTION.md](MOTION_PREDICTION.md)：使用 `run_roi_predict_gpu.ps1` 或追加 `--pipeline zoom --motion-prediction`。预测用于安排有限的 ROI 搜索，失锁预测单独记录并画虚线，不计作已检测或锁定目标。
+
 本项目独立实现 YOLOMG 论文第 III-A 节的运动特征增强模块（MFEM）：高斯平滑与灰度化、网格采样、稀疏金字塔 Lucas–Kanade（LK）光流跟踪、RANSAC 单应矩阵估计、摄像头运动补偿、三帧差分，以及可调的形态学处理。运动模块由本项目实现；新增的检测模块使用 `vendor/YOLOMG` 中的作者源码和官方 1280 预训练权重，保留其 GPL-3.0 许可证和来源校验记录。
 
 原有 `python -m yolomg_motion` 命令仍只输出配准与运动差分，运行只需 NumPy 和 OpenCV。新增 `python -m yolomg_motion.track_cli` 将原始彩色图和三帧差分输入官方 YOLOMG 网络，再用时序关联与局部模板匹配锁定目标，输出带黄色框的视频。检测需要 PyTorch 和预训练权重，支持 CPU。跟踪是本项目增加的功能，不属于论文原有检测网络，也没有重新训练模型。输入视频和输出图像均在本机处理，程序不会上传原图或视频。

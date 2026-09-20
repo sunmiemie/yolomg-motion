@@ -66,16 +66,80 @@ def decode_video(path, errors, warnings):
     return report
 
 
-def _bbox_problem(box, width, height):
+def _bbox_problem(box, width, height, *, allow_outside=False):
     if not isinstance(box, list) or len(box) != 4 or not all(_number(v) for v in box):
         return 'bbox must be four finite xyxy numbers'
     x1, y1, x2, y2 = box
     if x2 <= x1 or y2 <= y1:
         return 'bbox must have positive width and height'
     # xyxy uses continuous image coordinates; x2==width/y2==height is valid.
-    if min(x1, y1) < 0 or (width is not None and x2 > width) or (height is not None and y2 > height):
+    if not allow_outside and (min(x1, y1) < 0 or (width is not None and x2 > width) or
+                              (height is not None and y2 > height)):
         return 'bbox is outside video bounds'
     return None
+
+
+def _audit_prediction(row, config, width, height, label, errors):
+    """Validate optional search hints without treating extrapolations as observations."""
+    prediction = row.get('prediction')
+    enabled = isinstance(config, dict) and config.get('enabled') is True
+    if enabled and 'prediction' not in row:
+        errors.append(f'{label}: enabled motion prediction requires prediction, which may be null')
+    coasting = False
+    if prediction is not None:
+        if not enabled:
+            errors.append(f'{label}: prediction requires enabled motion_prediction metadata')
+        if not isinstance(prediction, dict):
+            errors.append(f'{label}: prediction must be null or an object')
+        else:
+            problem = _bbox_problem(prediction.get('bbox'), width, height, allow_outside=True)
+            if problem:
+                errors.append(f'{label} prediction: {problem}')
+            for key in ('center', 'velocity', 'std_xy', 'future_center'):
+                vector = prediction.get(key)
+                if not isinstance(vector, list) or len(vector) != 2 or not all(_number(v) for v in vector):
+                    errors.append(f'{label} prediction: {key} must contain two finite numbers')
+                elif key == 'std_xy' and min(vector) < 0:
+                    errors.append(f'{label} prediction: std_xy must be nonnegative')
+            covariance = prediction.get('covariance')
+            if (not isinstance(covariance, list) or len(covariance) != 2 or
+                    any(not isinstance(row, list) or len(row) != 2 or not all(_number(v) for v in row)
+                        for row in covariance)):
+                errors.append(f'{label} prediction: covariance must be a finite 2x2 matrix')
+            else:
+                a, b = covariance[0]
+                c, d = covariance[1]
+                if a < 0 or d < 0 or not math.isclose(b, c, rel_tol=1e-6, abs_tol=1e-9):
+                    errors.append(f'{label} prediction: covariance must be symmetric with nonnegative variances')
+                # Compare normalized entries to avoid overflow for malformed large values.
+                scale = max(abs(a), abs(b), abs(c), abs(d), 1.)
+                if (a/scale)*(d/scale) - (b/scale)*(c/scale) < -1e-9:
+                    errors.append(f'{label} prediction: covariance must be positive semidefinite')
+            age = prediction.get('age_frames')
+            if not _integer(age) or age < 0:
+                errors.append(f'{label} prediction: age_frames must be a nonnegative integer')
+            elif enabled and _integer(config.get('max_gap_frames')) and age > config['max_gap_frames']:
+                errors.append(f'{label} prediction: age_frames exceeds max_gap_frames')
+            horizon = prediction.get('horizon_frames')
+            if not _integer(horizon) or horizon < 0:
+                errors.append(f'{label} prediction: horizon_frames must be a nonnegative integer')
+            coasting = prediction.get('coasting') is True
+            if not isinstance(prediction.get('coasting'), bool):
+                errors.append(f'{label} prediction: coasting must be boolean')
+            elif coasting != (row.get('state') in ('LOST', 'SEARCHING')):
+                errors.append(f'{label} prediction: coasting must agree with LOST/SEARCHING state')
+            if coasting and (row.get('bbox') is not None or row.get('source') != 'none'):
+                errors.append(f'{label} prediction: coasting requires null observed bbox and source none')
+    roi = row.get('prediction_roi')
+    if roi is not None:
+        if not isinstance(prediction, dict):
+            errors.append(f'{label}: prediction_roi requires an active prediction')
+        problem = _bbox_problem(roi, width, height)
+        if problem:
+            errors.append(f'{label} prediction_roi: {problem}')
+        elif enabled and _integer(config.get('max_roi')) and max(roi[2]-roi[0], roi[3]-roi[1]) > config['max_roi']:
+            errors.append(f'{label}: prediction_roi exceeds max_roi budget')
+    return coasting
 
 
 def _intervals(rows, predicate, fps):
@@ -103,7 +167,35 @@ def audit_run(run_dir):
     except (OSError, ValueError) as exc:
         errors.append(f'Tracking JSON: {exc}')
         tracks, summary = [], {}
-    roi_pipeline = summary.get('pipeline') == 'detect_then_roi'
+    zoom_pipeline = summary.get('pipeline') == 'roi_zoom_detection'
+    roi_pipeline = summary.get('pipeline') in ('detect_then_roi', 'roi_zoom_detection')
+    max_rois, detect_every = None, None
+    if zoom_pipeline:
+        max_rois = summary.get('max_rois', 2)
+        if not _integer(max_rois) or max_rois < 1:
+            errors.append('Run metadata: max_rois must be a positive integer')
+            max_rois = None
+        if 'detect_every' in summary:
+            detect_every = summary['detect_every']
+            if not _integer(detect_every) or detect_every < 1:
+                errors.append('Run metadata: detect_every must be a positive integer')
+                detect_every = None
+        for key in ('detector_calls', 'detector_frames'):
+            if key not in summary:
+                errors.append(f'Run metadata: ROI zoom requires {key}')
+    prediction_config = summary.get('motion_prediction')
+    if prediction_config is not None:
+        if not isinstance(prediction_config, dict) or not isinstance(prediction_config.get('enabled'), bool):
+            errors.append('Run metadata: motion_prediction must be an object with boolean enabled')
+        elif prediction_config['enabled']:
+            for key in ('max_gap_frames', 'max_roi'):
+                if not _integer(prediction_config.get(key)) or prediction_config[key] < 1:
+                    errors.append(f'Run metadata: motion_prediction.{key} must be a positive integer')
+            for key in ('gate_threshold', 'process_noise'):
+                if not _number(prediction_config.get(key)) or prediction_config[key] <= 0:
+                    errors.append(f'Run metadata: motion_prediction.{key} must be finite and positive')
+            if 'predicted_only_frames' not in summary:
+                errors.append('Run metadata: enabled motion prediction requires predicted_only_frames')
     headless = roi_pipeline and summary.get('video_enabled') is False
     video_names = [] if headless else ['tracked_zoom.mp4']
     if (run_dir/'tracked.mp4').exists():
@@ -139,11 +231,15 @@ def audit_run(run_dir):
             errors.append(f'{name}: FPS differs from run metadata input_fps')
     required = {'frame_index', 'timestamp_seconds', 'state', 'bbox', 'track_id', 'source',
                 'detector_confidence', 'appearance_score', 'detector_ran', 'motion_valid', 'detections'}
+    if zoom_pipeline:
+        required.update({'detector_calls', 'detection_windows', 'network_input_shapes', 'motion_scope'})
     rows, previous_index = [], None
+    previous_attempt = None
     previous_locked_id = None
     seen_ids, last_episode_id, episodes = set(), None, []
     states, sources, locked_sources = Counter(), Counter(), Counter()
-    locked_frames = detector_calls = motion_invalid_frames = motion_skipped_frames = 0
+    locked_frames = detector_calls = detector_frames = motion_invalid_frames = motion_skipped_frames = 0
+    predicted_only_frames = 0
     for position, raw in enumerate(tracks):
         label = f'tracks.json row {position}'
         if not isinstance(raw, dict):
@@ -210,6 +306,7 @@ def audit_run(run_dir):
                 previous_locked_id = track_id
         else:
             previous_locked_id = None
+        predicted_only_frames += _audit_prediction(raw, prediction_config, width, height, label, errors)
         for key in ('detector_confidence', 'appearance_score'):
             value = raw.get(key)
             if value is not None and not _number(value):
@@ -229,7 +326,59 @@ def audit_run(run_dir):
                 errors.append(f'{label}: skipped motion requires null motion_valid and no detector execution')
         elif not isinstance(valid, bool):
             errors.append(f'{label}: motion_valid must be boolean for computed motion')
-        detector_calls += ran is True
+        detector_frames += ran is True
+        if zoom_pipeline:
+            calls = raw.get('detector_calls')
+            calls_valid = _integer(calls) and calls >= 0
+            if not calls_valid:
+                errors.append(f'{label}: detector_calls must be a nonnegative integer')
+            else:
+                detector_calls += calls
+                if ran is not bool(calls):
+                    errors.append(f'{label}: detector_ran disagrees with detector_calls')
+                if max_rois is not None and calls > max_rois:
+                    errors.append(f'{label}: detector_calls exceeds max_rois budget')
+                if calls and (raw.get('motion_computed') is not True or valid is not True):
+                    errors.append(f'{label}: network calls require computed, valid motion input')
+            windows = raw.get('detection_windows')
+            if not isinstance(windows, list):
+                errors.append(f'{label}: detection_windows must be an array')
+            else:
+                if calls_valid and len(windows) != calls:
+                    errors.append(f'{label}: detection_windows count disagrees with detector_calls')
+                if max_rois is not None and len(windows) > max_rois:
+                    errors.append(f'{label}: detection_windows exceeds max_rois budget')
+                for number, window in enumerate(windows):
+                    if not isinstance(window, list) or len(window) != 4 or not all(_integer(v) for v in window):
+                        errors.append(f'{label} detection window {number}: requires four integer xyxy coordinates')
+                    else:
+                        problem = _bbox_problem(window, width, height)
+                        if problem:
+                            errors.append(f'{label} detection window {number}: {problem}')
+            shapes = raw.get('network_input_shapes')
+            if not isinstance(shapes, list):
+                errors.append(f'{label}: network_input_shapes must be an array')
+            else:
+                if calls_valid and len(shapes) != calls:
+                    errors.append(f'{label}: network_input_shapes count disagrees with detector_calls')
+                for number, shape in enumerate(shapes):
+                    # Test/custom detector adapters can explicitly report an unknown shape.
+                    if shape is not None and (not isinstance(shape, list) or len(shape) != 4 or
+                                              not all(_integer(v) and v > 0 for v in shape)):
+                        errors.append(f'{label} network input {number}: expected null or four positive NCHW dimensions')
+            computed, scope = raw.get('motion_computed'), raw.get('motion_scope')
+            if computed is True:
+                if scope not in ('full', 'local'):
+                    errors.append(f'{label}: computed motion requires full or local motion_scope')
+                if _integer(index) and index >= 0:
+                    if (detect_every is not None and previous_attempt is not None and
+                            index - previous_attempt < detect_every):
+                        errors.append(f'{label}: motion attempt violates detect_every interval')
+                    previous_attempt = index
+            elif computed is False and scope is not None:
+                errors.append(f'{label}: skipped motion requires null motion_scope')
+        else:
+            detector_calls += ran is True
         motion_invalid_frames += valid is False
         if ran is True and valid is not True:
             errors.append(f'{label}: detector ran without valid motion input')
@@ -251,7 +400,8 @@ def audit_run(run_dir):
                         errors.append(f'{prefix}: confidence must lie in [0, 1]')
         elif detections is not None:
             errors.append(f'{label}: detections must be null when detector did not run')
-    for key, observed in (('locked_frames', locked_frames), ('detector_calls', detector_calls)):
+    for key, observed in (('locked_frames', locked_frames), ('detector_calls', detector_calls),
+                          ('detector_frames', detector_frames), ('predicted_only_frames', predicted_only_frames)):
         if key in summary and (not _integer(summary[key]) or summary[key] != observed):
             errors.append(f'Run metadata: {key} disagrees with tracking frames')
     for key, observed in (('states', dict(states)), ('sources', dict(sources))):
@@ -272,8 +422,10 @@ def audit_run(run_dir):
                 last_frame_index=rows[-1].get('frame_index') if rows else None,
                 states=dict(states), sources=dict(sources), locked_sources=dict(locked_sources),
                 locked_frames=locked_frames, unlocked_frames=len(tracks)-locked_frames,
+                predicted_only_frames=predicted_only_frames,
                 lock_fraction=locked_frames/len(tracks) if tracks else 0.,
-                detector_calls=detector_calls, motion_invalid_frames=motion_invalid_frames,
+                detector_calls=detector_calls, detector_frames=detector_frames,
+                motion_invalid_frames=motion_invalid_frames,
                 motion_skipped_frames=motion_skipped_frames,
                 track_ids=sorted(seen_ids), track_episodes=episodes, unlocked_intervals=unlocked,
                 longest_unlocked_frames=max((span['frame_count'] for span in unlocked), default=0),

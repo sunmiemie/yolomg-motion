@@ -1,4 +1,4 @@
-"""Detect to acquire a drone, then track only a local ROI until visual lock fails."""
+"""Run legacy template tracking or opt-in original-resolution ROI zoom detection."""
 import argparse
 from collections import Counter
 from dataclasses import asdict
@@ -14,6 +14,7 @@ from .roi_pipeline import ROIPipeline, timing_statistics
 from .run_artifacts import write_tracking_run
 from .track_cli import draw_result
 from .tracking import SingleTargetTracker
+from .zoom_pipeline import ZoomROIPipeline
 
 
 def main(argv=None):
@@ -26,7 +27,32 @@ def main(argv=None):
     parser.add_argument('--device', choices=('cpu', 'cuda', 'directml'), default='cpu')
     parser.add_argument('--gpu-id', type=int, default=0)
     parser.add_argument('--motion-backend', choices=('cpu', 'opencl'), default='cpu')
-    parser.add_argument('--image-size', type=int, default=1280)
+    parser.add_argument('--pipeline', choices=('template', 'zoom'), default='template',
+                        help='template: existing full-frame acquisition; zoom: detect enlarged original-frame crops')
+    parser.add_argument('--image-size', type=int,
+                        help='Network input size: default 1280 for template, 640 for zoom')
+    parser.add_argument('--roi-size', type=int, default=320,
+                        help='Zoom detection window side in original-frame pixels')
+    parser.add_argument('--motion-context', type=int, default=640,
+                        help='Local motion registration context side; must contain the detection ROI')
+    parser.add_argument('--max-rois', type=int, default=2,
+                        help='Maximum network calls per scheduled zoom detection frame')
+    parser.add_argument('--zoom-detect-every', type=int, default=10,
+                        help='Minimum source-frame interval between zoom detection attempts, including lost frames')
+    parser.add_argument('--motion-threshold', type=float, default=8.,
+                        help='Motion proposal threshold in grayscale difference units')
+    parser.add_argument('--scan-every', type=int, default=3,
+                        help='Use a scan window every N zoom search attempts to cover weak-motion targets')
+    parser.add_argument('--motion-prediction', action='store_true',
+                        help='Opt-in motion prediction for zoom search and trajectory overlays; does not confirm detections')
+    parser.add_argument('--prediction-max-gap', type=int, default=20,
+                        help='Maximum source frames to retain an unobserved prediction')
+    parser.add_argument('--prediction-gate', type=float, default=16.,
+                        help='Motion tracker association gate')
+    parser.add_argument('--prediction-process-noise', type=float, default=.25,
+                        help='Motion prediction process noise; larger values permit more acceleration')
+    parser.add_argument('--prediction-max-roi', type=int, default=480,
+                        help='Maximum prediction search ROI side in source pixels; at least roi-size')
     parser.add_argument('--confidence', type=float, default=.10)
     parser.add_argument('--lock-confidence', type=float, default=.10)
     parser.add_argument('--confirmations', type=int, default=2)
@@ -41,6 +67,8 @@ def main(argv=None):
     parser.add_argument('--target-fps', type=float, default=60., help='Timing budget only; does not change video FPS')
     parser.add_argument('--no-video', action='store_true', help='Write only tracks.json for headless timing')
     args = parser.parse_args(argv)
+    if args.image_size is None:
+        args.image_size = 640 if args.pipeline == 'zoom' else 1280
     if not args.input.is_file():
         parser.error(f'Input not found: {args.input}')
     if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
@@ -51,6 +79,19 @@ def main(argv=None):
             not 0 < args.confidence <= args.lock_confidence < 1 or
             not 0 < args.appearance_threshold <= 1):
         parser.error('Invalid interval, size, confidence, frame limit or timing budget')
+    if (min(args.roi_size, args.motion_context) < 32 or args.motion_context < args.roi_size or
+            min(args.max_rois, args.zoom_detect_every, args.scan_every) < 1 or
+            not np.isfinite(args.motion_threshold) or not 0 < args.motion_threshold <= 255):
+        parser.error('Invalid zoom ROI, context, network-call budget, interval or motion threshold')
+    if args.motion_prediction:
+        if args.pipeline != 'zoom':
+            parser.error('--motion-prediction requires --pipeline zoom')
+        if args.prediction_max_gap < args.zoom_detect_every:
+            parser.error('--prediction-max-gap must be >= --zoom-detect-every to permit detector confirmation')
+        if (args.prediction_max_gap < 1 or args.prediction_max_roi < args.roi_size or
+                not np.isfinite(args.prediction_gate) or args.prediction_gate <= 0 or
+                not np.isfinite(args.prediction_process_noise) or args.prediction_process_noise <= 0):
+            parser.error('Invalid prediction gap, association gate, process noise or maximum ROI')
     cv2.setNumThreads(args.threads)
     weights = args.weights or args.repo/'runs/train/ARD100_mask32-1280_uavs/weights/best.pt'
     options = dict(repo_dir=args.repo, weights=weights, image_size=args.image_size,
@@ -63,11 +104,31 @@ def main(argv=None):
         from .yolo_detector import YOLOMGDetector
         detector = YOLOMGDetector(**options, device=f'cuda:{args.gpu_id}' if args.device == 'cuda' else 'cpu')
     extractor = MotionExtractor(MotionConfig(open_iterations=0, close_iterations=0), backend=args.motion_backend)
-    tracker = SingleTargetTracker(confirmations=args.confirmations, max_detector_gap=None,
-                                  min_confidence=args.lock_confidence, search_radius=args.search_radius,
-                                  appearance_threshold=args.appearance_threshold, roi_only=True,
-                                  min_template_width=8, min_template_height=8, template_padding=2)
-    pipeline = ROIPipeline(detector, extractor, tracker, args.detect_every, args.verify_every)
+    tracker_options = dict(confirmations=args.confirmations, max_detector_gap=None,
+                           min_confidence=args.lock_confidence, search_radius=args.search_radius,
+                           appearance_threshold=args.appearance_threshold, roi_only=True,
+                           min_template_width=8, min_template_height=8, template_padding=2)
+    if args.motion_prediction:
+        from .predictive_tracking import PredictiveTargetTracker
+        tracker = PredictiveTargetTracker(**tracker_options, prediction_max_gap=args.prediction_max_gap,
+                                          prediction_gate=args.prediction_gate,
+                                          process_noise=args.prediction_process_noise)
+    else:
+        tracker = SingleTargetTracker(**tracker_options)
+    local_extractor = None
+    if args.pipeline == 'zoom':
+        local_extractor = MotionExtractor(
+            MotionConfig(alignment_width=320, alignment_height=320, grid_step=24, grid_step_y=24,
+                         min_inliers=10, blur_size=5, open_iterations=0, close_iterations=0),
+            backend=args.motion_backend)
+        prediction_options = dict(prediction_max_roi=args.prediction_max_roi) if args.motion_prediction else {}
+        pipeline = ZoomROIPipeline(detector, extractor, tracker, local_extractor=local_extractor,
+                                   detect_every=args.zoom_detect_every, roi_size=args.roi_size,
+                                   motion_context=args.motion_context, max_rois=args.max_rois,
+                                   motion_threshold=args.motion_threshold, scan_every=args.scan_every,
+                                   **prediction_options)
+    else:
+        pipeline = ROIPipeline(detector, extractor, tracker, args.detect_every, args.verify_every)
     setup_seconds = perf_counter() - setup_started
     cap = cv2.VideoCapture(str(args.input))
     if not cap.isOpened():
@@ -79,6 +140,10 @@ def main(argv=None):
         parser.error('Input has no valid FPS')
     args.output.mkdir(parents=True, exist_ok=True)
     rows, writer = [], None
+    trajectory = None
+    if args.motion_prediction and not args.no_video:
+        from .trajectory import TrajectoryRenderer
+        trajectory = TrajectoryRenderer(max_points=60)
     read_count, written, current_index = 0, 0, None
     status, error = 'complete', None
     decode_seconds, output_seconds = 0., 0.
@@ -102,6 +167,9 @@ def main(argv=None):
             tick = perf_counter()
             if not args.no_video:
                 canvas = draw_result(observation.frame, observation.result, observation.frame_index, fps, zoom=True)
+                if trajectory is not None:
+                    canvas = trajectory.render(canvas, observation.result, observation.frame_index,
+                                               observation.details, fps=fps)
                 if writer is None:
                     writer = cv2.VideoWriter(str(args.output/'tracked_zoom.mp4'),
                                              cv2.VideoWriter_fourcc(*'mp4v'), fps,
@@ -118,7 +186,7 @@ def main(argv=None):
             rows.append(row)
             if len(rows) % 120 == 0:
                 print(f'Frame {observation.frame_index}: {observation.result.state}; '
-                      f'detector calls {sum(r["detector_ran"] for r in rows)}', flush=True)
+                      f'detector calls {sum(r.get("detector_calls", int(r["detector_ran"])) for r in rows)}', flush=True)
     except BaseException as caught:
         status = 'interrupted' if isinstance(caught, KeyboardInterrupt) else 'failed'
         error = dict(type=type(caught).__name__, message=str(caught), source_frame_index=current_index)
@@ -133,10 +201,12 @@ def main(argv=None):
         reacquisition = [r for r in rows if r['mode'] == 'detection']
         stage = {key: sum(r['stage_timings'][key] for r in rows)
                  for key in ('motion_seconds', 'detector_seconds', 'tracking_seconds')}
-        metadata = dict(pipeline='detect_then_roi', input=str(args.input.resolve()), weights=str(weights.resolve()),
+        metadata = dict(pipeline='roi_zoom_detection' if args.pipeline == 'zoom' else 'detect_then_roi',
+                        input=str(args.input.resolve()), weights=str(weights.resolve()),
                         model_input_size=args.image_size, confidence_threshold=args.confidence,
                         lock_confidence_threshold=args.lock_confidence, confirmations=args.confirmations,
-                        detect_every=args.detect_every, verify_every=args.verify_every, max_detector_gap=None,
+                        detect_every=args.zoom_detect_every if args.pipeline == 'zoom' else args.detect_every,
+                        verify_every=None if args.pipeline == 'zoom' else args.verify_every, max_detector_gap=None,
                         search_radius=args.search_radius, appearance_threshold=args.appearance_threshold,
                         template_config=dict(min_width=8, min_height=8, padding=2),
                         detector_backend=args.device, motion_backend=args.motion_backend, tracking_backend='cpu',
@@ -148,7 +218,8 @@ def main(argv=None):
                         last_lock_frame=locked[-1]['frame_index'] if locked else None,
                         last_recorded_source_frame=rows[-1]['frame_index'] if rows else None,
                         states=dict(Counter(r['state'] for r in rows)), sources=dict(Counter(r['source'] for r in rows)),
-                        detector_calls=sum(r['detector_ran'] for r in rows),
+                        detector_frames=sum(bool(r['detector_ran']) for r in rows),
+                        detector_calls=sum(r.get('detector_calls', int(r['detector_ran'])) for r in rows),
                         motion_calls=sum(r['motion_computed'] for r in rows), roi_frames=len(roi),
                         detector_seconds=stage['detector_seconds'], stage_timings=stage,
                         decode_seconds=decode_seconds, visualization_and_encoding_seconds=output_seconds,
@@ -167,6 +238,40 @@ def main(argv=None):
                              'No automatic template refresh; shape change, occlusion and background drift can cause loss or wrong lock. '
                              'motion_valid=null means motion was deliberately skipped, not failed. '
                              'Timing excludes final JSON serialization; wall includes decode, optional draw/encode and writer flush.')
+        if args.pipeline == 'zoom':
+            metadata.update(
+                roi_size=args.roi_size, motion_context=args.motion_context, max_rois=args.max_rois,
+                zoom_detect_every=args.zoom_detect_every, motion_threshold=args.motion_threshold,
+                scan_every=args.scan_every, local_motion_runtime=local_extractor.backend_info,
+                full_motion_config=asdict(extractor.config), local_motion_config=asdict(local_extractor.config),
+                full_motion_calls=sum(r.get('motion_scope') == 'full' for r in rows),
+                local_motion_calls=sum(r.get('motion_scope') == 'local' for r in rows),
+                detector_attempt_frames=sum(r['mode'] == 'detection' for r in rows),
+                max_detector_calls_per_frame=max((r.get('detector_calls', 0) for r in rows), default=0),
+                network_input_shapes=[list(shape) for shape in sorted({
+                    tuple(shape) for r in rows for shape in r.get('network_input_shapes', []) if shape})],
+                note='Centered k=2 omits first/last two frames and adds lookahead latency. '
+                     'Zoom crops come from original-resolution RGB and corresponding registered motion. '
+                     'Detection attempts obey the source-frame interval and per-frame ROI budget; '
+                     'intermediate frames use local template tracking. '
+                     'Searching uses full-frame motion; tracked locations use local motion context. '
+                     'motion_valid=null means deliberately skipped, not failed. '
+                     'Interpolation does not recover missing image detail; weak motion, background clutter '
+                     'and unmatched training scales can still cause missed detections or wrong locks. '
+                     'Inference is synchronous; desktop throughput is not RKNN or board performance. '
+                     'Timing excludes final JSON serialization; wall includes decode, optional draw/encode and writer flush.')
+            stage['proposal_seconds'] = sum(r['stage_timings'].get('proposal_seconds', 0.) for r in rows)
+        if args.motion_prediction:
+            metadata.update(
+                motion_prediction=dict(enabled=True, max_gap_frames=args.prediction_max_gap,
+                                       gate_threshold=args.prediction_gate, process_noise=args.prediction_process_noise,
+                                       max_roi=args.prediction_max_roi, velocity_units='pixels/frame',
+                                       trajectory_points=60),
+                predicted_only_frames=sum(
+                    bool((r.get('prediction') or {}).get('coasting'))
+                    for r in rows))
+            metadata['note'] += (' Motion predictions guide bounded ROI search and are drawn dashed. '
+                                 'Predicted-only positions are not observed boxes or locked target coordinates.')
         write_tracking_run(args.output, rows, metadata)
         print(json.dumps(metadata, ensure_ascii=False, indent=2))
     return 0 if locked else 2
