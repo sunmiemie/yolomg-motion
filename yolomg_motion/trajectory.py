@@ -17,10 +17,11 @@ class TrajectoryRenderer:
     PREDICTED = (230, 120, 255)
     WINDOW = (255, 205, 50)
 
-    def __init__(self, max_points=60):
+    def __init__(self, max_points=60, show_history=False):
         if isinstance(max_points, bool) or not isinstance(max_points, int) or not 1 <= max_points <= 60:
             raise ValueError('max_points must be an integer between 1 and 60')
         self.max_points = max_points
+        self.show_history = bool(show_history)
         self._points = deque(maxlen=max_points)
         self._identity = None
         self._last_index = None
@@ -112,19 +113,20 @@ class TrajectoryRenderer:
             self._rectangle(canvas, window, self.WINDOW)
         self._rectangle(canvas, details.get('prediction_roi'), self.PREDICTED, dashed=True)
         points = list(self._points)
-        for previous, current in zip(points, points[1:]):
-            color = self.OBSERVED if current[2] == 'detector' else self.TEMPLATE
-            cv2.line(canvas, previous[1], current[1], color, 2, cv2.LINE_AA)
-        for _, point, source in points:
-            cv2.circle(canvas, point, 2 if source == 'detector' else 1,
-                       self.OBSERVED if source == 'detector' else self.TEMPLATE, -1, cv2.LINE_AA)
+        if self.show_history:
+            for previous, current in zip(points, points[1:]):
+                color = self.OBSERVED if current[2] == 'detector' else self.TEMPLATE
+                cv2.line(canvas, previous[1], current[1], color, 2, cv2.LINE_AA)
+            for _, point, source in points:
+                cv2.circle(canvas, point, 2 if source == 'detector' else 1,
+                           self.OBSERVED if source == 'detector' else self.TEMPLATE, -1, cv2.LINE_AA)
         prediction = details.get('prediction') or {}
         center = self._point(prediction.get('center'), frame.shape)
         future = self._point(prediction.get('future_center'), frame.shape)
         if center is not None:
             if result.state == 'LOST':
                 self._rectangle(canvas, prediction.get('bbox'), self.PREDICTED, dashed=True)
-                if points:
+                if self.show_history and points:
                     self._dashed_line(canvas, points[-1][1], center, self.PREDICTED)
             if future is not None:
                 self._dashed_line(canvas, center, future, self.PREDICTED, arrow=True)
@@ -135,8 +137,10 @@ class TrajectoryRenderer:
         status = 'PREDICTED ONLY - target LOST' if prediction and result.state == 'LOST' else 'MOTION PREDICTION'
         legend = [
             (status + ('  |  ' + speed if speed else ''), self.PREDICTED),
-            ('Solid trail: observed positions (green YOLO / yellow template)', (230, 230, 230)),
-            ('Dashed: prediction only   Cyan box: actual detection ROI', (230, 230, 230)),
+            ('Solid trail: observed positions (green YOLO / yellow template)' if self.show_history
+             else 'Purple dashed: predicted direction / search ROI', (230, 230, 230)),
+            ('Dashed: prediction only   Cyan box: actual detection ROI' if self.show_history
+             else 'Cyan box: actual detection ROI', (230, 230, 230)),
         ]
         h, w = canvas.shape[:2]
         top = max(0, h-68)

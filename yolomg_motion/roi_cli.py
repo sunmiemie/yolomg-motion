@@ -266,7 +266,7 @@ def main(argv=None):
                 motion_prediction=dict(enabled=True, max_gap_frames=args.prediction_max_gap,
                                        gate_threshold=args.prediction_gate, process_noise=args.prediction_process_noise,
                                        max_roi=args.prediction_max_roi, velocity_units='pixels/frame',
-                                       trajectory_points=60),
+                                       trajectory_points=60, trajectory_history_visible=False),
                 predicted_only_frames=sum(
                     bool((r.get('prediction') or {}).get('coasting'))
                     for r in rows))
