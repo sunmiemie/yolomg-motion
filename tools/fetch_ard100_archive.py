@@ -3,7 +3,8 @@ import argparse
 import io
 import json
 import operator
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+import stat
 import zipfile
 
 import requests
@@ -79,6 +80,52 @@ class HTTPRangeFile(io.RawIOBase):
         super().close()
 
 
+def plan_members(archive, output, names):
+    """Reject an invalid batch before downloading any selected file."""
+    root = Path(output).resolve()
+    planned, destinations = [], set()
+    for name in names:
+        posix, windows = PurePosixPath(name), PureWindowsPath(name)
+        if (not name or '\\' in name or posix.is_absolute() or windows.drive
+                or '..' in posix.parts):
+            raise ValueError(f'Unsafe archive member path: {name}')
+        for component in posix.parts:
+            stem = component.split('.', 1)[0].upper()
+            if (any(character in '<>:"|?*' or ord(character) < 32 for character in component)
+                    or component.endswith(('.', ' '))
+                    or stem in ('CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$')
+                    or stem in {prefix + suffix for prefix in ('COM', 'LPT')
+                                for suffix in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '¹', '²', '³')}):
+                raise ValueError(f'Unsafe Windows archive member path: {name}')
+        info = archive.getinfo(name)
+        if stat.S_ISLNK(info.external_attr >> 16) or info.flag_bits & 1:
+            raise ValueError(f'Unsupported link or encrypted member: {name}')
+        destination = (root / name).resolve()
+        destination.relative_to(root)
+        key = str(destination).casefold()
+        if key in destinations:
+            raise ValueError(f'Duplicate destination in member selection: {name}')
+        destinations.add(key)
+        if destination.exists() and not (info.is_dir() and destination.is_dir()):
+            raise FileExistsError(destination)
+        partial = destination.with_name(destination.name + '.partial')
+        if not info.is_dir() and partial.exists():
+            raise FileExistsError(partial)
+        for parent in destination.parents:
+            if parent == root:
+                break
+            if parent.exists() and not parent.is_dir():
+                raise NotADirectoryError(parent)
+        planned.append((info, destination))
+    files = {str(path).casefold() for info, path in planned if not info.is_dir()}
+    for info, path in planned:
+        if any(str(parent).casefold() in files for parent in path.parents):
+            raise ValueError(f'Selected file is also a parent directory: {path}')
+        if not info.is_dir() and str(path.with_name(path.name + '.partial')).casefold() in destinations:
+            raise ValueError(f'Selected member conflicts with a partial download: {path}')
+    return planned
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
@@ -90,15 +137,14 @@ def main():
     metadata = next(item for item in record['files'] if item['key'] == 'ARD100.zip')
     args.output.mkdir(parents=True, exist_ok=True)
     with HTTPRangeFile(metadata['links']['self'], metadata['size']) as remote, zipfile.ZipFile(remote) as archive:
+        planned = plan_members(archive, args.output, args.member)
         members = [dict(name=i.filename, bytes=i.file_size, compressed_bytes=i.compress_size,
                         crc32=f'{i.CRC:08x}') for i in archive.infolist()]
         manifest = dict(record=RECORD, archive=metadata, source_note='Public Zenodo mirror uploaded by Yu-Hsi Chen; official author download is Baidu. Archive contents are checked against the official sequence split; not a claim of bytewise verification against Baidu.', members=members)
         (args.output/'archive_manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
         print(f'Archive contains {len(members)} entries; full metadata saved to archive_manifest.json', flush=True)
-        for name in args.member:
-            info = archive.getinfo(name)
-            destination = (args.output/name).resolve()
-            destination.relative_to(args.output.resolve())
+        for info, destination in planned:
+            name = info.filename
             if info.is_dir():
                 destination.mkdir(parents=True, exist_ok=True)
                 continue
