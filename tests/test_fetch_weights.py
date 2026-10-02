@@ -37,3 +37,16 @@ def test_concurrent_destination_is_not_overwritten(tmp_path, monkeypatch):
         fetch_weights.fetch_weights(path)
     assert path.read_bytes() == b'another process'
     assert list(tmp_path.iterdir()) == [path]
+
+
+def test_verify_only_never_downloads_or_creates_paths(tmp_path, monkeypatch):
+    path = tmp_path / 'new' / 'model.pt'
+    monkeypatch.setattr(fetch_weights.urllib.request, 'urlopen', lambda *a, **k: pytest.fail('offline verification'))
+    with pytest.raises(SystemExit) as error:
+        fetch_weights.main(['--verify-only', '--output', str(path)])
+    assert error.value.code == 2
+    assert not path.parent.exists()
+    path.parent.mkdir()
+    path.write_bytes(b'local')
+    monkeypatch.setattr(fetch_weights, 'EXPECTED_SHA256', hashlib.sha256(b'local').hexdigest())
+    assert fetch_weights.main(['--verify-only', '--output', str(path)]) == 0

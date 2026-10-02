@@ -1,4 +1,5 @@
 """Download the published checkpoint at a pinned revision and verify SHA-256."""
+import argparse
 import hashlib
 import os
 from pathlib import Path
@@ -53,9 +54,23 @@ def fetch_weights(target):
     print('Downloaded and verified:', target)
 
 
-def main():
-    fetch_weights(Path(__file__).resolve().parents[1] / 'vendor' / 'YOLOMG' / RELATIVE)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path,
+                        default=Path(__file__).resolve().parents[1] / 'vendor' / 'YOLOMG' / RELATIVE)
+    parser.add_argument('--verify-only', action='store_true',
+                        help='Check an existing file without network access or directory creation')
+    args = parser.parse_args(argv)
+    if args.verify_only:
+        if not args.output.is_file():
+            parser.error(f'Checkpoint not found: {args.output}')
+        if file_sha256(args.output) != EXPECTED_SHA256:
+            parser.error('Checkpoint SHA-256 does not match the pinned release')
+        print('Verified existing checkpoint:', args.output)
+    else:
+        fetch_weights(args.output)
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
