@@ -22,7 +22,10 @@ from yolomg_motion.run_artifacts import read_tracking_run
 
 
 def _number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    try:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _integer(value):
@@ -116,6 +119,9 @@ def audit_run(run_dir):
         fps = None
     if not tracks:
         errors.append('tracks.json: no output frames')
+    if (summary.get('completed') is False or summary.get('partial') is True
+            or summary.get('status') in ('failed', 'interrupted')):
+        errors.append('Run metadata: processing is incomplete')
     if not _integer(summary.get('output_frames')) or summary['output_frames'] != len(tracks):
         errors.append('Run metadata: output_frames does not equal tracking frame count')
     for name, video in videos.items():
@@ -144,7 +150,7 @@ def audit_run(run_dir):
         if missing:
             errors.append(f'{label}: missing fields {missing}')
         index = raw.get('frame_index')
-        if not _integer(index) or index < 0:
+        if not _integer(index) or not _number(index) or index < 0:
             errors.append(f'{label}: frame_index must be a nonnegative integer')
         else:
             if previous_index is not None and index != previous_index+1:
@@ -153,18 +159,22 @@ def audit_run(run_dir):
         timestamp = raw.get('timestamp_seconds')
         if not _number(timestamp) or timestamp < 0:
             errors.append(f'{label}: invalid timestamp_seconds')
-        elif fps and _integer(index) and abs(timestamp-index/fps) > 1e-4:
+        elif fps and _integer(index) and _number(index) and abs(timestamp-index/fps) > 1e-4:
             errors.append(f'{label}: timestamp_seconds disagrees with frame_index/input_fps')
         state, source = raw.get('state'), raw.get('source')
-        if not isinstance(state, str) or not state:
-            errors.append(f'{label}: state must be a nonempty string')
+        if not isinstance(state, str) or state not in ('SEARCHING', 'CONFIRMING', 'LOCKED', 'LOST'):
+            errors.append(f'{label}: unknown tracker state')
         else:
             states[state] += 1
-        if not isinstance(source, str) or not source:
-            errors.append(f'{label}: source must be a nonempty string')
+        if not isinstance(source, str) or source not in ('none', 'detector', 'template'):
+            errors.append(f'{label}: unknown tracking source')
         else:
             sources[source] += 1
         box, track_id = raw.get('bbox'), raw.get('track_id')
+        if state in ('SEARCHING', 'LOST') and (box is not None or source != 'none'):
+            errors.append(f'{label}: inactive tracker state must have no bbox or tracking source')
+        if state in ('CONFIRMING', 'LOCKED') and source == 'none':
+            errors.append(f'{label}: active tracker state requires an observation source')
         box_valid = box is not None
         if box is not None:
             problem = _bbox_problem(box, width, height)

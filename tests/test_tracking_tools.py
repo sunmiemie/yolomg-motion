@@ -129,3 +129,30 @@ def test_gt_comparison_v2_reads_one_json_and_only_explicitly_generates_outputs(t
     assert not (run/'summary.json').exists()
     assert {p.name for p in run.iterdir()} == {'tracks.json', 'tracked_zoom.mp4', 'ground_truth_comparison'}
     assert all((run/name).read_bytes() == value for name, value in before.items())
+
+
+@pytest.mark.parametrize('update,expected', [
+    ({'state': 'UNKNOWN'}, 'unknown tracker state'),
+    ({'source': 'predicted'}, 'unknown tracking source'),
+    ({'state': 'LOST'}, 'inactive tracker state'),
+    ({'source': 'none'}, 'observation source'),
+    ({'frame_index': 10**1000}, 'frame_index'),
+])
+def test_audit_rejects_impossible_tracker_records(tmp_path, update, expected):
+    run = _run(tmp_path)
+    path = run / 'tracks.json'
+    payload = json.loads(path.read_text())
+    payload['frames'][0].update(update)
+    path.write_text(json.dumps(payload))
+    report = audit_run(run)
+    assert not report['passed']
+    assert any(expected in error for error in report['errors'])
+
+
+def test_complete_video_cannot_hide_interrupted_run_status(tmp_path):
+    run = _run(tmp_path)
+    path = run / 'tracks.json'
+    payload = json.loads(path.read_text())
+    payload['metadata']['status'] = 'interrupted'
+    path.write_text(json.dumps(payload))
+    assert any('incomplete' in error for error in audit_run(run)['errors'])
