@@ -106,6 +106,11 @@ def _validate_frame(frame):
 
 def three_frame_difference(center, aligned_previous, aligned_next):
     """Paper Eq. (1), with floating-point arithmetic BEFORE subtraction/addition."""
+    for value in (center, aligned_previous, aligned_next):
+        if (not isinstance(value, np.ndarray) or value.size == 0
+                or value.dtype.kind not in 'uif' or not np.isfinite(value).all()
+                or np.any(value < 0) or np.any(value > 255)):
+            raise ValueError('Difference inputs must be nonempty numeric images in [0,255]')
     if center.shape != aligned_previous.shape or center.shape != aligned_next.shape:
         raise ValueError('The three grayscale images must have identical shapes')
     if center.ndim != 2:
@@ -124,7 +129,9 @@ class MotionExtractor:
 
     def __init__(self, config=None, backend='cpu'):
         from .opencl_motion import OpenCLMotionBackend, backend_information
-        self.config = config or MotionConfig()
+        if config is not None and not isinstance(config, MotionConfig):
+            raise TypeError('config must be a MotionConfig instance or None')
+        self.config = config if config is not None else MotionConfig()
         self.backend = backend
         self._opencl = OpenCLMotionBackend() if backend == 'opencl' else None
         self.backend_info = self._opencl.info if self._opencl else backend_information(backend)
