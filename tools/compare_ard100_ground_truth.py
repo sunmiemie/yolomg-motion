@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from yolomg_motion.run_artifacts import read_tracking_run
+from yolomg_motion.run_artifacts import read_tracking_run, write_json_atomic
 
 
 def _valid_box(box):
@@ -256,6 +256,8 @@ def main(argv=None):
     parser.add_argument('--alignment-verified', action='store_true',
                         help='Record that the preview was visually checked against the source video')
     args = parser.parse_args(argv)
+    if args.snapshot_every < 1 or not np.isfinite(args.annotation_offset):
+        parser.error('snapshot-every must be positive and annotation-offset must be finite')
     if not args.preview_only and not args.alignment_verified:
         parser.error('First use --preview-only, inspect GT alignment, then pass --alignment-verified')
     if args.snapshot_every < 1 or not np.isfinite(args.annotation_offset):
@@ -264,23 +266,28 @@ def main(argv=None):
         rows, run_summary = read_tracking_run(args.run, strict_finite=True)
     except (OSError, ValueError) as exc:
         parser.error(f'Cannot read tracking run: {exc}')
-    indices = [row['frame_index'] for row in rows]
-    if not indices or indices != sorted(set(indices)) or indices[0] < 0:
+    indices = [row.get('frame_index') for row in rows]
+    if (not indices or any(type(index) is not int or index < 0 for index in indices)
+            or indices != sorted(set(indices))):
         parser.error('tracks.json needs nonempty, unique, increasing source frame indices')
+    if not isinstance(run_summary.get('input'), str) or not run_summary['input']:
+        parser.error('Run metadata needs a source video path')
     source = Path(run_summary['input'])
     if source.stem != args.sequence:
         parser.error('Sequence must match the source video filename; do not evaluate with another video\'s labels')
     if run_summary.get('output_frames') != len(rows):
         parser.error('Run metadata output_frames does not match tracking frame count')
     output = args.run/'ground_truth_comparison'
-    output.mkdir(parents=True, exist_ok=True)
     if not args.preview_only and any((output/name).exists() for name in ('comparison.mp4', 'gt_evaluation.json')):
         parser.error('Ground-truth evaluation output already exists; choose a fresh run copy')
     with ZipFile(args.annotations) as archive:
         annotations = {index: read_annotation(archive, args.sequence, index, args.annotation_offset)
                        for index in indices}
+    # Validate metric inputs before rendering or creating any result files.
+    metrics, frame_evaluations = evaluate_rows(rows, annotations)
     cap = cv2.VideoCapture(str(source))
     if not cap.isOpened():
+        cap.release()
         parser.error(f'Cannot open source video: {source}')
     fps = float(cap.get(cv2.CAP_PROP_FPS))
     if not np.isfinite(fps) or fps <= 0:
@@ -289,6 +296,7 @@ def main(argv=None):
     mapping = {row['frame_index']: row for row in rows}
     writer, visited, index = None, 0, 0
     try:
+        output.mkdir(parents=True, exist_ok=True)
         while index <= indices[-1]:
             ok, frame = cap.read()
             if not ok:
@@ -326,7 +334,6 @@ def main(argv=None):
         parser.error('No annotated Drone frame was available for visual verification')
     if visited != len(rows):
         raise RuntimeError(f'Video ended before all run frames: decoded {visited}/{len(rows)} evaluated positions')
-    metrics, frame_evaluations = evaluate_rows(rows, annotations)
     report = dict(sequence=args.sequence, source_video=str(source.resolve()),
         run=str(args.run.resolve()), annotation_zip=str(args.annotations.resolve()),
         annotation_offset=args.annotation_offset, annotation_frame_mapping='XML number = source frame_index + 1',
@@ -337,10 +344,10 @@ def main(argv=None):
         matching='Confidence-ordered greedy one-to-one IoU matching on detector_ran frames only.',
         difficult_policy='Eligible Drone matches take priority. Otherwise predictions overlapping difficult Drone boxes at IoU>=0.5 are ignored, not false positives. Difficult objects never add false negatives.',
         missing_annotation_policy='Missing XML excluded from GT metrics and detection TP/FP/FN; missing count reported.',
-        tracking_definitions='Correct: LOCKED with IoU>=0.5 against any eligible GT. Wrong: LOCKED without a match. Missed: eligible GT but no LOCKED box; wrong and missed are disjoint. Mean IoU uses all GT-positive frames, with unlocked frames scored zero.',
+        tracking_definitions='Correct: LOCKED with IoU>=0.5 against eligible GT. Ignored: a remaining lock overlapping difficult GT. Wrong: any other LOCKED box. Missed: eligible GT but no LOCKED box. Mean IoU uses GT-positive frames, with unlocked frames scored zero.',
         limitations='Fixed-threshold precision/recall, NOT AP. This evaluates only the recorded run frames of one sequence, NOT the full 35-sequence test benchmark. GT-centered zoom is for display only.',
         metrics=metrics, per_frame=frame_evaluations)
-    (output/'gt_evaluation.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    write_json_atomic(output/'gt_evaluation.json', report)
     print(json.dumps(dict(output=str(output), metrics=metrics), ensure_ascii=False, indent=2))
     return 0
 
