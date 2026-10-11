@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 from .core import MotionConfig, MotionExtractor
-from .run_artifacts import read_tracking_run, write_tracking_run
+from .run_artifacts import read_tracking_run, write_tracking_run, source_file_identity, validate_source_identity
 from .tracking import Detection, SingleTargetTracker
 
 
@@ -64,6 +64,7 @@ def cached_centers(cap, cache, input_path, max_frames):
         raise ValueError('Motion cache is incomplete; generate a complete cache before replay')
     if Path(summary['input']).resolve() != input_path.resolve():
         raise ValueError('Motion cache belongs to a different input video')
+    validate_source_identity(summary, input_path)
     config = summary.get('config')
     if (type(summary.get('first_center_index')) is not int or summary['first_center_index'] != 2
             or not isinstance(config, dict) or type(config.get('frame_step')) is not int
@@ -199,6 +200,7 @@ def main(argv=None):
         try:
             cached_rows, cached_summary = read_tracking_run(args.detection_cache, strict_finite=True)
             validate_detection_cache(cached_rows, cached_summary)
+            validate_source_identity(cached_summary, args.input)
         except (OSError, ValueError) as error:
             parser.error(f'Invalid detection cache: {error}')
         if (Path(cached_summary['input']).resolve() != args.input.resolve()
@@ -225,6 +227,7 @@ def main(argv=None):
             detector = YOLOMGDetector(**options)
     tracker = SingleTargetTracker(min_confidence=args.lock_confidence, max_detector_gap=args.max_detector_gap,
                                   backend=args.tracking_backend)
+    source_identity = source_file_identity(args.input)
     cap = cv2.VideoCapture(str(args.input))
     if not cap.isOpened():
         cap.release()
@@ -295,7 +298,8 @@ def main(argv=None):
         if writer is not None:
             writer.release()
         locked = [r for r in rows if r['state'] == 'LOCKED' and r['bbox'] is not None]
-        summary = dict(input=str(args.input.resolve()), weights=str(weights.resolve()),
+        summary = dict(input=str(args.input.resolve()), source_file_identity=source_identity,
+                   weights=str(weights.resolve()),
                    motion_input='aligned centered three-frame mean residual, k=2, no morphology',
                    model_input_size=args.image_size, confidence_threshold=args.confidence,
                    lock_confidence_threshold=args.lock_confidence,

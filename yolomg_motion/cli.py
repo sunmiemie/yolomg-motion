@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 from .core import MotionConfig, MotionExtractor
-from .run_artifacts import write_json_atomic, write_npz_atomic
+from .run_artifacts import source_file_identity, write_json_atomic, write_npz_atomic
 
 
 def write_image(path, data):
@@ -99,6 +99,7 @@ def main(argv=None):
         cfg = MotionConfig(**settings)
     except (ValueError, TypeError) as error:
         parser.error(str(error))
+    source_identity = source_file_identity(args.input)
     cap = cv2.VideoCapture(str(args.input))
     try:
         if not cap.isOpened():
@@ -172,7 +173,8 @@ def main(argv=None):
     valid_rows = [r for r in rows if r['success']]
     before = float(np.mean([r['unaligned_mean'] for r in valid_rows])) if valid_rows else None
     after = float(np.mean([r['aligned_mean'] for r in valid_rows])) if valid_rows else None
-    summary = dict(input=str(args.input.resolve()), config=asdict(cfg), video_fps=fps,
+    summary = dict(input=str(args.input.resolve()), source_file_identity=source_identity,
+                   config=asdict(cfg), video_fps=fps,
                    status=('complete' if processing_error is None else
                            'interrupted' if isinstance(processing_error, KeyboardInterrupt) else 'failed'),
                    completed=processing_error is None, partial=processing_error is not None,

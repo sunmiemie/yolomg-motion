@@ -6,6 +6,23 @@ from pathlib import Path
 import tempfile
 
 
+def source_file_identity(path):
+    """Cheap cache freshness metadata, not a cryptographic content identity."""
+    info = Path(path).stat()
+    return dict(size_bytes=info.st_size, mtime_ns=info.st_mtime_ns)
+
+
+def validate_source_identity(metadata, path):
+    saved = metadata.get('source_file_identity')
+    if saved is None:  # Legacy artifacts did not record source freshness.
+        return
+    if (not isinstance(saved, dict) or set(saved) != {'size_bytes', 'mtime_ns'}
+            or any(type(value) is not int or value < 0 for value in saved.values())):
+        raise ValueError('Cache source file identity is malformed')
+    if saved != source_file_identity(path):
+        raise ValueError('Cache source file size or modification time has changed')
+
+
 def _check_finite(value, location='run'):
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f'Non-finite numeric value at {location}')
