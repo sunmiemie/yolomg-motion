@@ -9,14 +9,11 @@ import cv2
 import numpy as np
 
 from .core import MotionConfig, MotionExtractor
-from .run_artifacts import source_file_identity, write_json_atomic, write_npz_atomic
+from .run_artifacts import source_file_identity, write_json_atomic, write_npz_atomic, write_png_atomic
 
 
 def write_image(path, data):
-    ok, encoded = cv2.imencode('.png', data)
-    if not ok:
-        raise RuntimeError(f'Cannot encode image: {path}')
-    encoded.tofile(str(path))
+    write_png_atomic(path, data)
 
 
 def preview(result, gain=6.0):

@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from yolomg_motion.run_artifacts import read_tracking_run, write_json_atomic
+from yolomg_motion.run_artifacts import read_tracking_run, write_json_atomic, write_png_atomic
 
 
 def _valid_box(box):
@@ -239,10 +239,7 @@ def draw_comparison(frame, row, annotation):
 
 
 def write_png(path, image):
-    ok, encoded = cv2.imencode('.png', image)
-    if not ok:
-        raise RuntimeError(f'Cannot encode PNG: {path}')
-    encoded.tofile(str(path))
+    write_png_atomic(path, image)
 
 
 def main(argv=None):

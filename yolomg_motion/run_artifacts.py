@@ -139,3 +139,26 @@ def write_npz_atomic(path, **arrays):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def write_png_atomic(path, pixels):
+    """Encode and atomically publish a PNG, including Unicode destinations."""
+    import cv2
+
+    success, encoded = cv2.imencode('.png', pixels)
+    if not success:
+        raise RuntimeError(f'Cannot encode PNG: {path}')
+    path = Path(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f'.{path.stem}.',
+                                         suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(encoded.tobytes())
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
