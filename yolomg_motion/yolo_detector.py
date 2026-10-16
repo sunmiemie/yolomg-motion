@@ -32,6 +32,23 @@ def validate_model_options(image_size, conf_threshold, iou_threshold, threads):
             raise ValueError(f'{name} threshold must be a finite number in (0,1]')
 
 
+def _decode_detections(values, image_shape):
+    """Keep only finite, bounded model observations with valid score/label fields."""
+    if (not isinstance(values, np.ndarray) or values.ndim != 2 or values.shape[1] != 6
+            or values.dtype.kind not in 'uif'):
+        raise ValueError('Model NMS output must be a numeric N x 6 array')
+    height, width = image_shape
+    result = []
+    for row in values:
+        if (not np.isfinite(row).all() or not 0 <= row[4] <= 1
+                or row[5] < 0 or row[5] != np.floor(row[5])
+                or not 0 <= row[0] < row[2] <= width
+                or not 0 <= row[1] < row[3] <= height):
+            continue
+        result.append(Detection(tuple(float(v) for v in row[:4]), float(row[4]), int(row[5])))
+    return result
+
+
 class YOLOMGDetector:
     """Run published YOLOMG weights on a BGR frame and its raw motion map.
 
@@ -181,8 +198,4 @@ class YOLOMGDetector:
                 )
             values = detections.detach().cpu().numpy()
         self.last_inference_seconds = perf_counter() - began
-        return [
-            Detection(tuple(float(v) for v in row[:4]), float(row[4]), int(row[5]))
-            for row in values
-            if np.isfinite(row).all() and row[2] > row[0] and row[3] > row[1]
-        ]
+        return _decode_detections(values, frame_bgr.shape[:2])
