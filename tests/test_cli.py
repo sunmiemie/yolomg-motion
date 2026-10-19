@@ -44,14 +44,15 @@ def _artifact_hashes(directory):
     }
 
 
-def test_cli_saves_centered_motion_artifacts_and_refuses_overwrite(tmp_path, capsys):
+@pytest.mark.parametrize("config_encoding", ["utf-8", "utf-8-sig"])
+def test_cli_saves_centered_motion_artifacts_and_refuses_overwrite(tmp_path, capsys, config_encoding):
     source = tmp_path / "camera_motion.avi"
     output = tmp_path / "results"
     width, height = _write_camera_motion_video(source)
     config = tmp_path / "motion_config.json"
     config.write_text(
         json.dumps({"grid_step": 20, "grid_step_y": 20, "lk_window": 21, "min_inliers": 15}),
-        encoding="utf-8",
+        encoding=config_encoding,
     )
     arguments = [
         "--input", str(source),
@@ -153,3 +154,41 @@ def test_cli_saves_centered_motion_artifacts_and_refuses_overwrite(tmp_path, cap
     assert rejected.value.code == 2
     assert "Output directory is not empty" in capsys.readouterr().err
     assert _artifact_hashes(output) == originals
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected_error"),
+    [
+        pytest.param(None, "Cannot load config", id="missing-file"),
+        pytest.param(b"{", "Cannot load config", id="invalid-json"),
+        pytest.param(b"\xff", "Cannot load config", id="invalid-encoding"),
+        pytest.param(b"null", "Config must contain a JSON object", id="null"),
+        pytest.param(b"true", "Config must contain a JSON object", id="boolean"),
+        pytest.param(b"1", "Config must contain a JSON object", id="number"),
+        pytest.param(b'"text"', "Config must contain a JSON object", id="string"),
+        pytest.param(b"[]", "Config must contain a JSON object", id="empty-array"),
+        pytest.param(b'[["frame_step", 1]]', "Config must contain a JSON object", id="pairs-array"),
+    ],
+)
+def test_cli_rejects_invalid_config_before_opening_video(
+    tmp_path, monkeypatch, capsys, contents, expected_error
+):
+    source = tmp_path / "input.avi"
+    source.touch()
+    output = tmp_path / "results"
+    config = tmp_path / "motion_config.json"
+    if contents is not None:
+        config.write_bytes(contents)
+
+    def unexpected_capture(*args, **kwargs):
+        pytest.fail("Invalid configuration must be rejected before opening the video")
+
+    monkeypatch.setattr("yolomg_motion.cli.cv2.VideoCapture", unexpected_capture)
+    with pytest.raises(SystemExit) as rejected:
+        main(["--input", str(source), "--output", str(output), "--config", str(config)])
+
+    assert rejected.value.code == 2
+    error = capsys.readouterr().err
+    assert expected_error in error
+    assert str(config) in error
+    assert not output.exists()

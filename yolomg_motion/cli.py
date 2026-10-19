@@ -79,7 +79,13 @@ def main(argv=None):
     settings = dict(frame_step=args.frame_step, fb_threshold=args.fb_threshold,
                     alignment_width=args.alignment_width, alignment_height=args.alignment_height)
     if args.config:
-        settings.update(json.loads(args.config.read_text(encoding='utf-8-sig')))
+        try:
+            overrides = json.loads(args.config.read_text(encoding='utf-8-sig'))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            parser.error(f'Cannot load config {args.config}: {error}')
+        if not isinstance(overrides, dict):
+            parser.error(f'Config must contain a JSON object: {args.config}')
+        settings.update(overrides)
     if args.no_morphology:
         settings.update(open_iterations=0, close_iterations=0)
     try:
