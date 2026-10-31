@@ -223,6 +223,8 @@ def audit_run(run_dir):
         motion_invalid_frames += valid is False
         if ran is True and valid is not True:
             errors.append(f'{label}: detector ran without valid motion input')
+        if source == 'detector' and ran is not True:
+            errors.append(f'{label}: detector source requires detector_ran to be true')
         detections = raw.get('detections')
         if ran is True:
             if not isinstance(detections, list):

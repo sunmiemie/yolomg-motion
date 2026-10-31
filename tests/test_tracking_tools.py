@@ -156,3 +156,48 @@ def test_complete_video_cannot_hide_interrupted_run_status(tmp_path):
     payload['metadata']['status'] = 'interrupted'
     path.write_text(json.dumps(payload))
     assert any('incomplete' in error for error in audit_run(run)['errors'])
+
+
+@pytest.mark.parametrize('layout', ['v2', 'legacy'])
+def test_audit_rejects_detector_source_when_detector_did_not_run(tmp_path, layout, capsys):
+    run = _run(tmp_path, layout=layout)
+    path = run / 'tracks.json'
+    payload = json.loads(path.read_text(encoding='utf-8'))
+    rows = payload['frames'] if layout == 'v2' else payload
+    metadata = payload['metadata'] if layout == 'v2' else json.loads((run / 'summary.json').read_text())
+    rows[0].update(detector_ran=False, detections=None)
+    metadata['detector_calls'] = 2
+    path.write_text(json.dumps(payload), encoding='utf-8')
+    if layout == 'legacy':
+        (run / 'summary.json').write_text(json.dumps(metadata), encoding='utf-8')
+    before = {p.name: p.read_bytes() for p in run.iterdir()}
+
+    report = audit_run(run)
+
+    assert not report['passed']
+    assert report['errors'] == ['tracks.json row 0: detector source requires detector_ran to be true']
+    assert audit_main(['--run', str(run)]) == 2
+    assert json.loads(capsys.readouterr().out)['errors'] == report['errors']
+    assert {p.name: p.read_bytes() for p in run.iterdir()} == before
+
+
+@pytest.mark.parametrize('layout', ['v2', 'legacy'])
+@pytest.mark.parametrize('detector_ran', [False, True])
+def test_audit_accepts_template_tracking_with_skipped_or_empty_detection(tmp_path, layout, detector_ran):
+    run = _run(tmp_path, layout=layout)
+    path = run / 'tracks.json'
+    payload = json.loads(path.read_text(encoding='utf-8'))
+    rows = payload['frames'] if layout == 'v2' else payload
+    metadata = payload['metadata'] if layout == 'v2' else json.loads((run / 'summary.json').read_text())
+    rows[1].update(source='template', detector_confidence=None, appearance_score=.95,
+                   detector_ran=detector_ran, detections=[] if detector_ran else None)
+    metadata.update(sources={'detector': 2, 'template': 1}, detector_calls=2 + int(detector_ran))
+    path.write_text(json.dumps(payload), encoding='utf-8')
+    if layout == 'legacy':
+        (run / 'summary.json').write_text(json.dumps(metadata), encoding='utf-8')
+
+    report = audit_run(run)
+
+    assert report['passed'], report['errors']
+    assert report['detector_calls'] == 2 + int(detector_ran)
+    assert report['locked_sources'] == {'detector': 2, 'template': 1}

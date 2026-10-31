@@ -78,6 +78,8 @@ python -m pytest -q
 
 验收默认只在终端显示结果，不生成额外报告文件。确有诊断需要时可显式传入 `--report` 指定保存路径。
 
+验收会拒绝 `source="detector"` 却标记 `detector_ran=false` 的矛盾记录；新版单 JSON 和旧版轨迹数组均执行此检查。模板跟踪帧既可以跳过检测，也可以在检测运行但未关联到目标后继续匹配，因此不要求模板来源与 `detector_ran=false` 绑定。
+
 ## 文件与来源
 
 - `yolomg_motion/yolo_detector.py`：官方双路网络的 CPU 推理适配。
