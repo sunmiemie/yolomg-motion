@@ -197,6 +197,8 @@ else:
 
 两个 `homography` 都将来源帧坐标映射到中心帧坐标。`result.current` 保留中心帧原图；`result.center_gray` 为预处理后的中心灰度图；`unaligned_difference` 提供未配准的对照差分。离线调用的 `center_index` 默认为 `None`。
 
+返回的 `current` 和 `center_gray` 图像与流式内部帧缓存相互独立；调用方可以在结果图上标注或遮罩，不会影响后续 `push()` 的配准。配准失败时返回的图像也遵循这一规则。
+
 流式输入使用 `push(frame)`。缓存未满时返回 `None`，之后返回延迟 `k` 帧的中心结果：
 
 ```python

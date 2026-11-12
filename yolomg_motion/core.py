@@ -263,7 +263,7 @@ class MotionExtractor:
             motion[~valid] = 0
         else:
             valid[:] = False
-        return MotionResult(success, center_original.copy(), current, difference, motion,
+        return MotionResult(success, center_original.copy(), current.copy(), difference, motion,
                             unaligned, valid, a, b)
 
     def process_triplet(self, previous, current, following):
