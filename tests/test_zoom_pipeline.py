@@ -187,3 +187,236 @@ def test_artificial_context_edge_is_not_treated_as_physical_frame_edge():
     assert r.details['detector_calls'] == 1
     assert r.details['detections'] == []
     assert r.result.state == 'LOST' and r.result.bbox is None
+
+
+def test_contrast_search_can_acquire_weak_motion_target_without_extra_budget():
+    p, detector, full, local = pipeline(contrast_search=True)
+    full.no_proposals = True
+
+    def detect(rgb, motion):
+        assert motion.shape == rgb.shape[:2]
+        ys, xs = np.nonzero(rgb[:, :, 0] > 200)
+        return [] if not len(xs) else [SimpleNamespace(
+            bbox_xyxy=(float(xs.min()), float(ys.min()), float(xs.max()+1), float(ys.max()+1)),
+            confidence=.9)]
+
+    detector.detect = detect
+    rows = [r for i in range(20) if (r := p.push(image(i))) is not None]
+    assert rows[0].details['proposal_count'] == 0
+    assert rows[0].details['contrast_window'] is not None
+    assert rows[0].result.source == 'detector'
+    assert rows[4].result.state == 'LOCKED'
+    assert all(r.result.state == 'LOCKED' for r in rows[4:])
+    attempts = [r.frame_index for r in rows if r.details['detector_ran']]
+    assert all(b - a == 4 for a, b in zip(attempts, attempts[1:]))
+    assert all(r.details['detector_calls'] <= 2 for r in rows)
+    assert all(r.details['contrast_window'] is None for r in rows[1:])
+
+
+def test_contrast_candidates_cannot_lock_without_yolo_and_cannot_starve_scan():
+    p, detector, full, _ = pipeline(contrast_search=True, max_rois=1, scan_every=3)
+    full.no_proposals = True
+    detector.empty = True
+    rows = [r for i in range(28) if (r := p.push(image(i))) is not None]
+    attempts = [r for r in rows if r.details['detector_ran']]
+    assert attempts[0].details['contrast_window'] is not None
+    assert attempts[2].details['contrast_window'] is None
+    assert attempts[5].details['contrast_window'] is None
+    assert all(r.details['detector_calls'] == 1 for r in attempts)
+    assert all(r.result.bbox is None for r in rows)
+
+
+def test_contrast_search_cannot_bypass_failed_camera_registration():
+    p, detector, full, _ = pipeline(contrast_search=True)
+    full.valid = False
+    rows = [r for i in range(16) if (r := p.push(image(i))) is not None]
+    assert not detector.shapes
+    assert all(r.details['contrast_window'] is None for r in rows)
+
+
+@pytest.mark.parametrize('budget', [1, 2])
+def test_contrast_keeps_periodic_scan_slot_and_never_skips_unexecuted_tiles(monkeypatch, budget):
+    p, detector, _, _ = pipeline(contrast_search=True, max_rois=budget, scan_every=2)
+    detector.empty = True
+    monkeypatch.setattr('yolomg_motion.zoom_pipeline.motion_windows',
+                        lambda *args, **kwargs: [(200, 120, 264, 184), (280, 120, 344, 184)][:budget])
+    monkeypatch.setattr('yolomg_motion.zoom_pipeline.contrast_windows',
+                        lambda *args, **kwargs: [(80, 100, 144, 164)])
+    rows = [r for i in range(28) if (r := p.push(image(i))) is not None]
+    attempts = [r for r in rows if r.details['detector_ran']]
+    for number, row in enumerate(attempts[1::2]):
+        assert [48 * number, 0, 48 * number + 64, 64] in row.details['detection_windows']
+        assert row.details['detector_calls'] == budget
+        if budget == 2:
+            assert [200, 120, 264, 184] in row.details['detection_windows']
+    assert p._scan_cursor == len(attempts[1::2])
+
+
+def test_scale_retry_only_on_empty_local_detection_reuses_context_and_budget():
+    p, detector, _, local = pipeline(scale_retry=True)
+    for i in range(12):
+        p.push(image(i))
+    before = len(local.shapes)
+    real_detect = detector.detect
+    detector.detect = lambda rgb, motion: [] if rgb.shape[0] == 64 else real_detect(rgb, motion)
+    row = p.push(image(12))
+    assert row.result.state == 'LOCKED' and row.result.source == 'detector'
+    assert row.details['scale_retry_used']
+    assert row.details['detector_calls'] == 2
+    assert [w[2] - w[0] for w in row.details['detection_windows']] == [64, 32]
+    assert len(local.shapes) == before + 1
+
+
+def test_scale_retry_cannot_exceed_one_slot_or_run_on_intermediate_frames():
+    p, detector, _, _ = pipeline(scale_retry=True, max_rois=1)
+    for i in range(12):
+        row = p.push(image(i))
+        if row:
+            assert not row.details['scale_retry_used']
+    detector.empty = True
+    row = p.push(image(12))
+    assert row.details['detector_calls'] == 1
+    assert not row.details['scale_retry_used'] and row.result.state == 'LOST'
+
+
+def _recent_search_with_competing_contrast(monkeypatch, max_rois):
+    from yolomg_motion.predictive_tracking import PredictiveTargetTracker
+
+    full, local, detector = Motion(), Motion(), CropDetector()
+    tracker = PredictiveTargetTracker(
+        max_detector_gap=None, roi_only=True, min_template_width=8,
+        min_template_height=8, template_padding=2, min_confidence=.1,
+        prediction_max_gap=9, verification_grace=0)
+    p = ZoomROIPipeline(
+        detector, full, tracker, local_extractor=local, detect_every=4,
+        roi_size=64, motion_context=128, max_rois=max_rois, scan_every=2,
+        recent_search_attempts=2)
+    monkeypatch.setattr('yolomg_motion.zoom_pipeline.contrast_windows',
+                        lambda *args, **kwargs: [(240, 120, 304, 184)])
+    rows = {}
+    for i in range(29):
+        if i == 16:
+            # A real confirmed identity loses detection, then its prediction
+            # expires. The two recent-target attempts compete with contrast.
+            detector.empty = True
+            full.no_proposals = True
+            p.contrast_search = True
+        row = p.push(image(i))
+        if row is not None:
+            rows[row.frame_index] = row
+    assert rows[10].result.state == 'LOCKED'
+    assert rows[14].result.state == 'LOST'
+    assert rows[22].details['prediction'] is None
+    return p, rows
+
+
+def test_two_slots_preserve_periodic_scan_and_recent_target_ahead_of_contrast(monkeypatch):
+    p, rows = _recent_search_with_competing_contrast(monkeypatch, max_rois=2)
+    row = rows[22]
+    # The original detector box was (90, 110, 102, 118); its 64px crop
+    # remains available alongside the first global scan, without a third call.
+    assert row.details['detection_windows'] == [[0, 0, 64, 64], [64, 82, 128, 146]]
+    assert row.details['detection_reason'] == 'recent_target_search'
+    assert row.details['contrast_window'] is None
+    assert row.details['detector_calls'] == 2
+    assert row.result.bbox is None
+    assert p._scan_cursor == 1
+
+
+def test_one_slot_reports_actual_scan_then_recent_target_without_skipping_tiles(monkeypatch):
+    p, rows = _recent_search_with_competing_contrast(monkeypatch, max_rois=1)
+    scan, recent = rows[22], rows[26]
+    assert scan.details['detection_windows'] == [[0, 0, 64, 64]]
+    assert scan.details['detection_reason'] == 'motion_search'
+    assert recent.details['detection_windows'] == [[64, 82, 128, 146]]
+    assert recent.details['detection_reason'] == 'recent_target_search'
+    for row in (scan, recent):
+        assert row.details['contrast_window'] is None
+        assert row.details['detector_calls'] == 1
+        assert row.result.bbox is None
+    assert p._scan_cursor == 1
+
+
+@pytest.mark.parametrize('offset,expected_state', [(0, 'LOCKED'), (64, 'LOST')])
+def test_scale_retry_rejects_distant_background_but_accepts_nearby_candidate(offset, expected_state):
+    full, local = Motion(), Motion()
+    detector = SimpleNamespace(last_input_shape=(1, 3, 640, 640))
+
+    def visible_target(rgb, motion):
+        ys, xs = np.nonzero(rgb[:, :, 0] > 200)
+        return [] if not len(xs) else [SimpleNamespace(
+            bbox_xyxy=(float(xs.min()), float(ys.min()), float(xs.max()+1), float(ys.max()+1)),
+            confidence=.9)]
+
+    detector.detect = visible_target
+    p = ZoomROIPipeline(detector, full, local_extractor=local, detect_every=4,
+                        roi_size=320, motion_context=384, scale_retry=True)
+
+    def padded_image(index):
+        return np.pad(image(index), ((128, 128), (128, 128), (0, 0)),
+                      mode='constant', constant_values=40)
+
+    for i in range(12):
+        p.push(padded_image(i))
+    assert p.tracker.state == 'LOCKED'
+
+    def retry_candidate(rgb, motion):
+        if rgb.shape[0] == 320:
+            return []
+        assert rgb.shape[:2] == (224, 224)
+        # Both boxes fit the tight crop and have high confidence. Only the
+        # nearby candidate is consistent with the previous local track.
+        cx, cy = 112 + offset, 112
+        return [SimpleNamespace(bbox_xyxy=(cx-6., cy-4., cx+6., cy+4.), confidence=.99)]
+
+    detector.detect = retry_candidate
+    row = p.push(padded_image(12))
+    assert row.details['scale_retry_used'] and row.details['detector_calls'] == 2
+    assert row.result.state == expected_state
+    if offset:
+        assert row.details['detections'] == [] and row.result.bbox is None
+    else:
+        assert row.result.source == 'detector' and len(row.details['detections']) == 1
+
+
+@pytest.mark.parametrize('reason', ['textured_background', 'large_target'])
+def test_scale_retry_does_not_spend_spare_call_when_background_or_target_is_unsuitable(reason):
+    p, detector, _, _ = pipeline(scale_retry=True)
+
+    def scene(index):
+        frame = image(index)
+        if reason == 'large_target':
+            x = 80 + index
+            frame[110:118, x:x+40] = 230
+            frame[110:118, x+3:x+5] = 80
+        if reason == 'textured_background' and index >= 10:
+            # Texture is outside the central target patch so high target
+            # contrast itself does not incorrectly disable the retry.
+            yy, xx = np.mgrid[82:146, 64:128]
+            ring = (abs(xx-96) >= 16) | (abs(yy-114) >= 16)
+            texture = np.where((xx//4 + yy//4) % 2, 30, 120).astype(np.uint8)
+            frame[82:146, 64:128][ring] = texture[ring, None]
+        return frame
+
+    for i in range(10):
+        p.push(scene(i))
+    assert p.tracker.state == 'LOCKED'
+    detector.empty = True
+    for i in range(10, 13):
+        row = p.push(scene(i))
+    assert row.frame_index == 10
+    assert row.details['detector_calls'] == 1
+    assert not row.details['scale_retry_used']
+    assert row.result.bbox is None and row.result.state == 'LOST'
+
+
+@pytest.mark.parametrize('side,center,expected', [(16, (8, 8), False),
+                                                (64, (4, 4), True),
+                                                (64, (60, 60), True)])
+def test_retry_background_mask_handles_small_frames_and_targets_at_image_edges(side, center, expected):
+    p, _, _, _ = pipeline(scale_retry=True)
+    frame = np.full((side, side, 3), 40, np.uint8)
+    cx, cy = center
+    box = (cx-4, cy-4, cx+4, cy+4)
+    frame[box[1]:box[3], box[0]:box[2]] = 230
+    assert p._smooth_retry_background(frame, center, box) is expected

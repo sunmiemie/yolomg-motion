@@ -134,6 +134,77 @@ def motion_windows(motion, valid_mask, side=320, max_windows=2,
     return windows
 
 
+def contrast_windows(frame, valid_mask, side=320, max_windows=2):
+    """Find compact light/dark candidates in locally smooth image regions.
+
+    This only proposes crops: it never confirms a target. Work is capped at
+    960 pixels on the longest side, and is needed only on search frames. Dark
+    and light components stay separate so JPEG halos cannot join an isolated
+    target to a nearby lamp/building through the opposite-polarity response.
+    """
+    if (not isinstance(frame, np.ndarray) or frame.dtype != np.uint8 or
+            frame.ndim != 3 or frame.shape[2] != 3):
+        raise ValueError('frame must be a uint8 H x W x 3 BGR image')
+    height, width = _shape(frame.shape)
+    _integer(side, 'side')
+    max_windows = _integer(max_windows, 'max_windows', 0)
+    if (not isinstance(valid_mask, np.ndarray) or valid_mask.shape != (height, width) or
+            valid_mask.dtype.kind not in 'buif' or not np.isfinite(valid_mask).all()):
+        raise ValueError('valid_mask must be a finite numeric/bool array matching frame')
+    if not max_windows:
+        return []
+    scale = min(1., 960. / max(height, width))
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    small = cv2.resize(frame, size, interpolation=cv2.INTER_AREA) if scale < 1 else frame
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    valid = cv2.resize(valid_mask.astype(bool).astype(np.uint8), size,
+                       interpolation=cv2.INTER_NEAREST).astype(bool)
+    sh, sw = gray.shape
+    integral, squares = cv2.integral2(gray)
+
+    def rectangle_sum(table, x0, y0, x1, y1):
+        return table[y1, x1] - table[y0, x1] - table[y1, x0] + table[y0, x0]
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    ranked = []
+    for operation in (cv2.MORPH_BLACKHAT, cv2.MORPH_TOPHAT):
+        signal = cv2.morphologyEx(gray, operation, kernel)
+        foreground = (signal >= 12) & valid
+        count, labels, stats, centers = cv2.connectedComponentsWithStats(foreground.astype(np.uint8))
+        x, y, w, h, area = stats.T
+        eligible = ((area >= 3) & (area <= 120) & (w <= 24) & (h <= 24) &
+                    (w <= 8 * h) & (h <= 8 * w) & (x >= 2) & (y >= 2) &
+                    (x + w < sw - 2) & (y + h < sh - 2))
+        eligible[0] = False
+        ids = np.flatnonzero(eligible)
+        if not len(ids):
+            continue
+        sums = np.bincount(labels[foreground], weights=signal[foreground], minlength=count)
+        x, y, w, h = (a[ids] for a in (x, y, w, h))
+        x0, y0 = np.maximum(0, x - 6), np.maximum(0, y - 6)
+        x1, y1 = np.minimum(sw, x + w + 6), np.minimum(sh, y + h + 6)
+        n = (x1 - x0) * (y1 - y0) - w * h
+        background = rectangle_sum(integral, x0, y0, x1, y1) - rectangle_sum(integral, x, y, x+w, y+h)
+        background2 = rectangle_sum(squares, x0, y0, x1, y1) - rectangle_sum(squares, x, y, x+w, y+h)
+        noise = np.sqrt(np.maximum(0., background2 / n - (background / n) ** 2))
+        score = (sums[ids] / area[ids]) / (3. + noise)
+        shortlist = np.flatnonzero(score >= 4.)
+        if len(shortlist) > 64:
+            shortlist = shortlist[np.argpartition(-score[shortlist], 63)[:64]]
+        for pos in shortlist:
+            center = centers[ids[pos]] * (width / sw, height / sh)
+            ranked.append((float(score[pos]), tuple(center)))
+    ranked.sort(key=lambda item: -item[0])
+    windows = []
+    for _, center in ranked:
+        window = square_window(center, side, frame.shape)
+        if not any(_window_iou(window, other) >= .35 for other in windows):
+            windows.append(window)
+            if len(windows) == max_windows:
+                break
+    return windows
+
+
 def crop_detect(detector, frame, motion, window):
     """Detect one synchronized native-resolution crop and restore coordinates.
 

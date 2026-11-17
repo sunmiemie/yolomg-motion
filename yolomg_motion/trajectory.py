@@ -17,11 +17,12 @@ class TrajectoryRenderer:
     PREDICTED = (230, 120, 255)
     WINDOW = (255, 205, 50)
 
-    def __init__(self, max_points=60, show_history=False):
+    def __init__(self, max_points=60, show_history=False, show_prediction=False):
         if isinstance(max_points, bool) or not isinstance(max_points, int) or not 1 <= max_points <= 60:
             raise ValueError('max_points must be an integer between 1 and 60')
         self.max_points = max_points
         self.show_history = bool(show_history)
+        self.show_prediction = bool(show_prediction)
         self._points = deque(maxlen=max_points)
         self._identity = None
         self._last_index = None
@@ -111,7 +112,8 @@ class TrajectoryRenderer:
             self._identity = None
         for window in details.get('detection_windows', []):
             self._rectangle(canvas, window, self.WINDOW)
-        self._rectangle(canvas, details.get('prediction_roi'), self.PREDICTED, dashed=True)
+        if self.show_prediction:
+            self._rectangle(canvas, details.get('prediction_roi'), self.PREDICTED, dashed=True)
         points = list(self._points)
         if self.show_history:
             for previous, current in zip(points, points[1:]):
@@ -123,7 +125,7 @@ class TrajectoryRenderer:
         prediction = details.get('prediction') or {}
         center = self._point(prediction.get('center'), frame.shape)
         future = self._point(prediction.get('future_center'), frame.shape)
-        if center is not None:
+        if self.show_prediction and center is not None:
             if result.state == 'LOST':
                 self._rectangle(canvas, prediction.get('bbox'), self.PREDICTED, dashed=True)
                 if self.show_history and points:
@@ -135,15 +137,21 @@ class TrajectoryRenderer:
         if velocity.shape == (2,) and np.isfinite(velocity).all():
             speed = f'v=({velocity[0]:.1f}, {velocity[1]:.1f}) px/frame'
         status = 'PREDICTED ONLY - target LOST' if prediction and result.state == 'LOST' else 'MOTION PREDICTION'
+        if details.get('verification_pending'):
+            status = 'VISUAL TRACK - YOLO RECHECK'
+        if details.get('low_confidence_used'):
+            status = 'LOW SCORE DETECTION - YOLO RECHECK'
         legend = [
-            (status + ('  |  ' + speed if speed else ''), self.PREDICTED),
-            ('Solid trail: observed positions (green YOLO / yellow template)' if self.show_history
-             else 'Purple dashed: predicted direction / search ROI', (230, 230, 230)),
-            ('Dashed: prediction only   Cyan box: actual detection ROI' if self.show_history
-             else 'Cyan box: actual detection ROI', (230, 230, 230)),
+            (status + ('  |  ' + speed if speed else ''),
+             self.PREDICTED if self.show_prediction else (230, 230, 230)),
+            ('Cyan box: actual detection ROI', (230, 230, 230)),
         ]
+        if self.show_history:
+            legend.append(('Solid trail: observed positions (green YOLO / yellow template)', (230, 230, 230)))
+        if self.show_prediction:
+            legend.append(('Purple dashed: predicted direction / search ROI', (230, 230, 230)))
         h, w = canvas.shape[:2]
-        top = max(0, h-68)
+        top = max(0, h-(20*len(legend)+8))
         cv2.rectangle(canvas, (0, top), (min(w-1, 650), h-1), (22, 22, 22), -1)
         scale = min(.43, max(.22, w/1500.))
         for number, (text, color) in enumerate(legend):

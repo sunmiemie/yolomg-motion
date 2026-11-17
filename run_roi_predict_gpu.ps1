@@ -13,7 +13,13 @@ param(
     [double]$PredictionGate = 16.0,
     [double]$PredictionProcessNoise = 0.25,
     [int]$PredictionMaxRoi = 480,
-    [switch]$NoVideo
+    [switch]$NoVideo,
+    [switch]$StrictVerification,
+    [switch]$LegacyDetection,
+    [switch]$NoScaleRetry,
+    [switch]$FixedRoi,
+    [switch]$NoWeakAssociation,
+    [double]$LowConfidence = 0.04
 )
 $ErrorActionPreference = 'Stop'
 $taskPython = Join-Path $PSScriptRoot '.venv-gpu/Scripts/python.exe'
@@ -22,6 +28,13 @@ $taskInputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFr
 $taskOutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDir)
 $taskOptions = @()
 if ($NoVideo) { $taskOptions += '--no-video' }
+if ($StrictVerification) { $taskOptions += '--strict-verification' }
+if (-not ($LegacyDetection -or $StrictVerification)) {
+    $taskOptions += '--contrast-search'
+    if (-not $NoScaleRetry) { $taskOptions += '--scale-retry' }
+    if (-not $FixedRoi) { $taskOptions += '--adaptive-roi' }
+    if (-not $NoWeakAssociation) { $taskOptions += @('--low-confidence', $LowConfidence.ToString([Globalization.CultureInfo]::InvariantCulture)) }
+}
 Push-Location -LiteralPath $PSScriptRoot
 try {
     & $taskPython -m yolomg_motion.roi_cli --input $taskInputPath --output $taskOutputPath `

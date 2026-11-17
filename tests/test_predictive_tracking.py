@@ -30,8 +30,14 @@ def establish(t):
     assert t.update(frame(5), [Detection(box(5), .9)], 5).state == 'LOCKED'
 
 
+def establish_trusted(t):
+    for index in (0, 2, 5):
+        t.update(frame(index), [Detection(box(index), .9)], index)
+    assert t.state == 'LOCKED'
+
+
 def test_failed_detection_keeps_moving_hint_but_no_observed_box_or_template_update():
-    t = tracker()
+    t = tracker(verification_grace=0)
     establish(t)
     prior = t.prediction_details(10)
     result = t.update(frame(10), [], 10)  # target visibly present; verification failed
@@ -104,7 +110,9 @@ def test_inconsistent_template_is_rejected_by_innovation_gate(monkeypatch):
 
 
 @pytest.mark.parametrize('options', [dict(prediction_max_gap=0), dict(prediction_max_gap=True),
-                                   dict(prediction_gate=float('nan')), dict(process_noise=-1)])
+                                   dict(prediction_gate=float('nan')), dict(process_noise=-1),
+                                   dict(verification_grace=-1), dict(verification_grace=2),
+                                   dict(verification_grace=True), dict(verification_grace=.5)])
 def test_invalid_prediction_options(options):
     with pytest.raises(ValueError):
         tracker(**options)
@@ -152,3 +160,232 @@ def test_many_biased_templates_cannot_block_detector_grounded_correction(monkeyp
     assert result.state == 'LOCKED' and result.source == 'detector'
     assert result.bbox == box(15)
     assert t.predictor.predict(15) == t.detector_predictor.predict(15)
+
+
+def test_one_empty_verification_bridges_with_observation_but_second_loses():
+    t = tracker()
+    establish_trusted(t)
+    template = t._template.copy()
+    for index in range(6, 16):
+        result = t.update(frame(index), [] if index == 10 else None, index)
+        assert result.state == 'LOCKED' and result.source == 'template'
+        assert result.track_id == 1
+        np.testing.assert_allclose(result.bbox, box(index), atol=1)
+        assert t.verification_pending == (index >= 10)
+        assert t.last_detection_index == 5
+        assert t.prediction_details(index)['age_frames'] == index - 5
+        np.testing.assert_array_equal(t._template, template)
+    result = t.update(frame(16), [], 16)
+    assert result.state == 'LOST' and result.bbox is None
+    assert not t.verification_pending
+
+
+def test_successful_detector_clears_grace_without_changing_identity():
+    t = tracker()
+    establish_trusted(t)
+    t.update(frame(10), [], 10)
+    assert t.verification_pending
+    result = t.update(frame(15), [Detection(box(15), .9)], 15)
+    assert result.state == 'LOCKED' and result.track_id == 1 and result.source == 'detector'
+    assert not t.verification_pending and t.verification_misses == 0
+    assert t.last_detection_index == 15
+
+
+@pytest.mark.parametrize('failure_index', [10, 11])
+def test_grace_requires_visible_target_on_every_frame(failure_index):
+    t = tracker()
+    establish_trusted(t)
+    for index in range(10, failure_index + 1):
+        result = t.update(frame() if index == failure_index else frame(index),
+                          [] if index == 10 else None, index)
+    assert result.state == 'LOST' and result.bbox is None
+
+
+def test_grace_does_not_confirm_candidate_or_override_conflicting_detection():
+    t = tracker()
+    t.update(frame(0), [Detection(box(0), .9)], 0)
+    assert t.update(frame(5), [], 5).state == 'LOST'
+    t.reset()
+    establish_trusted(t)
+    result = t.update(frame(10), [Detection((240, 90, 250, 96), .99)], 10)
+    assert result.state == 'LOST' and result.bbox is None
+
+
+@pytest.mark.parametrize('drift,score', [(0., .79), (30., .99)])
+def test_grace_checks_score_and_detector_anchor_each_frame(monkeypatch, drift, score):
+    from yolomg_motion.tracking import SingleTargetTracker
+    t = tracker()
+    establish_trusted(t)
+    assert t.update(frame(10), [], 10).state == 'LOCKED'
+    candidate = tuple(np.array(box(11)) + [drift, 0, drift, 0])
+    monkeypatch.setattr(SingleTargetTracker, '_match_template', lambda *args: (candidate, score))
+    # Even a template-fed predictor agreeing with a distractor cannot bypass
+    # the independent detector-only anchor during verification grace.
+    monkeypatch.setattr(t.predictor, 'gate_distance', lambda *args, **kwargs: 0.)
+    result = t.update(frame(11), None, 11)
+    assert result.state == 'LOST' and result.bbox is None
+
+
+def test_grace_cannot_extend_hard_detector_lifetime():
+    t = tracker(prediction_max_gap=8)
+    establish_trusted(t)
+    assert t.update(frame(10), [], 10).state == 'LOCKED'
+    assert t.update(frame(13), None, 13).state == 'LOCKED'
+    assert t.update(frame(14), None, 14).state == 'LOST'
+    assert t.prediction_details(14) is None
+
+
+@pytest.mark.parametrize('confidences', [(.9, .9), (.9, .29, .9), (.9, .9, .29)])
+def test_new_or_weakly_detected_identity_cannot_use_grace(confidences):
+    t = tracker()
+    for index, confidence in enumerate(confidences):
+        t.update(frame(index), [Detection(box(index), confidence)], index)
+    assert t.state == 'LOCKED'
+    result = t.update(frame(5), [], 5)
+    assert result.state == 'LOST' and result.bbox is None
+
+
+def test_repeated_dropout_requires_three_fresh_detector_hits():
+    t = tracker()
+    establish_trusted(t)
+    assert t.update(frame(10), [], 10).state == 'LOCKED'
+    assert t.update(frame(15), [Detection(box(15), .9)], 15).state == 'LOCKED'
+    assert t.update(frame(20), [], 20).state == 'LOST'
+
+
+def test_weak_detection_rescue_keeps_confidence_and_strong_reference_lifetime():
+    t = tracker(low_confidence=.04, verification_grace=0)
+    establish_trusted(t)
+    template = t._template.copy()
+    anchor = t.detector_predictor.predict(10)
+    result = t.update(frame(10), [Detection(box(10), .08)], 10)
+    assert result.state == 'LOCKED' and result.source == 'detector'
+    assert result.bbox == box(10) and result.track_id == 1
+    assert result.detector_confidence == .08 and result.appearance_score >= .8
+    assert t.low_confidence_used and t.verification_pending
+    assert t.min_confidence == .2
+    assert t.last_detection_index == t._last_motion_detection_index == 5
+    assert t.prediction_details(10)['age_frames'] == 5
+    assert t.detector_predictor.predict(10) == anchor
+    assert t._consecutive_detector_hits == 0
+    np.testing.assert_array_equal(t._template, template)
+    assert t.update(frame(11), None, 11).state == 'LOCKED'
+    assert not t.low_confidence_used
+    assert t.last_detection_index == 5
+    np.testing.assert_array_equal(t._template, template)
+
+
+def test_weak_support_cannot_extend_strong_detector_hard_ttl():
+    t = tracker(low_confidence=.04, prediction_max_gap=8, verification_grace=0)
+    establish_trusted(t)
+    assert t.update(frame(10), [Detection(box(10), .08)], 10).state == 'LOCKED'
+    assert t.update(frame(13), None, 13).state == 'LOCKED'
+    result = t.update(frame(14), [Detection(box(14), .08)], 14)
+    assert result.state == 'LOST' and result.bbox is None
+    assert not t.low_confidence_used and t.prediction_details(14) is None
+
+
+def test_weak_support_cannot_bypass_base_detector_gap():
+    t = PredictiveTargetTracker(low_confidence=.04, max_detector_gap=6,
+                                roi_only=True, verification_grace=0)
+    establish_trusted(t)
+    result = t.update(frame(12), [Detection(box(12), .08)], 12)
+    assert result.state == 'LOST' and result.bbox is None
+    assert not t.low_confidence_used
+
+
+def test_only_one_weak_rescue_until_three_fresh_regular_detections():
+    t = tracker(low_confidence=.04, verification_grace=0)
+    establish_trusted(t)
+    assert t.update(frame(10), [Detection(box(10), .08)], 10).state == 'LOCKED'
+    assert t.update(frame(11), [Detection(box(11), .08)], 11).state == 'LOST'
+    assert not t.low_confidence_used
+    t.reset()
+    establish_trusted(t)
+    t.update(frame(10), [Detection(box(10), .08)], 10)
+    for index in (11, 12, 13):
+        result = t.update(frame(index), [Detection(box(index), .9)], index)
+        assert result.state == 'LOCKED' and result.track_id == 1
+        assert not t.low_confidence_used and not t.verification_pending
+    result = t.update(frame(14), [Detection(box(14), .08)], 14)
+    assert result.state == 'LOCKED' and t.low_confidence_used
+
+
+@pytest.mark.parametrize('prior_state', ['SEARCHING', 'CONFIRMING', 'LOCKED_NEW', 'LOST'])
+def test_weak_detections_cannot_acquire_confirm_or_reacquire(prior_state):
+    t = tracker(low_confidence=.04, verification_grace=0)
+    if prior_state == 'CONFIRMING':
+        t.update(frame(0), [Detection(box(0), .9)], 0)
+    elif prior_state == 'LOCKED_NEW':
+        establish(t)
+    elif prior_state == 'LOST':
+        establish_trusted(t)
+        t.update(frame(6), [], 6)
+    result = t.update(frame(10), [Detection(box(10), .08)], 10)
+    assert result.state in ('SEARCHING', 'LOST')
+    assert result.bbox is None and not t.low_confidence_used
+
+
+def test_regular_detection_wins_and_conflicting_regular_cannot_be_bypassed():
+    t = tracker(low_confidence=.04, verification_grace=0)
+    establish_trusted(t)
+    result = t.update(frame(10), [Detection(box(10), .08), Detection(box(10), .3)], 10)
+    assert result.detector_confidence == .3 and result.state == 'LOCKED'
+    assert not t.low_confidence_used and t.last_detection_index == 10
+    result = t.update(frame(15), [Detection(box(15), .08),
+                                  Detection((240, 90, 250, 96), .99)], 15)
+    assert result.state == 'LOST' and result.bbox is None
+    assert not t.low_confidence_used
+
+
+@pytest.mark.parametrize('candidate', [
+    Detection((200, 52, 210, 58), .08),  # outside detector anchor
+    Detection((64, 49, 92, 61), .08),    # implausibly different dimensions
+    Detection(box(10), .039),           # below guarded lower floor
+])
+def test_weak_candidate_geometry_and_floor_are_not_bypassed(candidate):
+    t = tracker(low_confidence=.04, verification_grace=0)
+    establish_trusted(t)
+    result = t.update(frame(10), [candidate], 10)
+    assert result.state == 'LOST' and not t.low_confidence_used
+
+
+def test_weak_requires_actual_target_pixels_not_only_background_match(monkeypatch):
+    t = tracker(low_confidence=.04, verification_grace=0)
+    establish_trusted(t)
+    # A context template can be dominated by stable background. Even a high
+    # mocked context score is insufficient when candidate pixels are empty.
+    monkeypatch.setattr(t, '_match_template', lambda *args: (box(10), .99))
+    result = t.update(frame(), [Detection(box(10), .08)], 10)
+    assert result.state == 'LOST' and not t.low_confidence_used
+
+
+def test_weak_requires_high_context_score_and_candidate_agreement(monkeypatch):
+    t = tracker(low_confidence=.04, verification_grace=0)
+    establish_trusted(t)
+    monkeypatch.setattr(t, '_match_template', lambda *args: (box(10), .79))
+    assert t.update(frame(10), [Detection(box(10), .08)], 10).state == 'LOST'
+    t.reset()
+    establish_trusted(t)
+    monkeypatch.setattr(t, '_match_template', lambda *args: (box(15), .99))
+    assert t.update(frame(10), [Detection(box(10), .08)], 10).state == 'LOST'
+
+
+def test_weak_mode_is_opt_in_and_reset_clears_its_state():
+    t = tracker(verification_grace=0)
+    establish_trusted(t)
+    assert t.update(frame(10), [Detection(box(10), .08)], 10).state == 'LOST'
+    assert not t.low_confidence_used
+    t = tracker(low_confidence=.04, verification_grace=0)
+    establish_trusted(t)
+    t.update(frame(10), [Detection(box(10), .08)], 10)
+    t.reset()
+    assert not t.low_confidence_used and not t._weak_rescue_used
+    assert t._weak_detection is None
+
+
+@pytest.mark.parametrize('value', [True, False, .039, .2, .8, float('nan'),
+                                  float('inf'), '.04'])
+def test_invalid_low_confidence_options(value):
+    with pytest.raises(ValueError, match='low_confidence'):
+        tracker(low_confidence=value)

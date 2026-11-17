@@ -57,7 +57,8 @@ def install_fake_pipeline(monkeypatch):
 
 
 @pytest.mark.parametrize('headless', [True, False])
-def test_prediction_wiring_counts_and_no_video_skips_rendering(tmp_path, monkeypatch, headless):
+@pytest.mark.parametrize('strict', [True, False])
+def test_prediction_wiring_counts_and_no_video_skips_rendering(tmp_path, monkeypatch, headless, strict):
     source, output = tmp_path/'input.mp4', tmp_path/'out'
     make_video(source)
     observed = install_fake_pipeline(monkeypatch)
@@ -79,15 +80,22 @@ def test_prediction_wiring_counts_and_no_video_skips_rendering(tmp_path, monkeyp
                  '--prediction-process-noise', '.5', '--prediction-max-roi', '700']
     if headless:
         arguments.append('--no-video')
+    if strict:
+        arguments.append('--strict-verification')
     assert roi_cli.main(arguments) == 0
     tracker = observed['tracker']
     assert isinstance(tracker, predictive_tracking.PredictiveTargetTracker)
     assert tracker.prediction_max_gap == 25 and tracker.prediction_gate == 12
+    assert tracker.verification_grace == (0 if strict else 1)
+    assert observed['pipeline_options']['recent_search_attempts'] == (0 if strict else 2)
     assert observed['pipeline_options']['prediction_max_roi'] == 700  # May exceed motion context.
     rows, metadata = read_tracking_run(output, strict_finite=True)
     assert metadata['motion_prediction'] == dict(enabled=True, max_gap_frames=25,
             gate_threshold=12., process_noise=.5, max_roi=700, velocity_units='pixels/frame',
-            trajectory_points=60, trajectory_history_visible=False)
+            trajectory_points=60, trajectory_history_visible=False, prediction_overlay_visible=False,
+            verification_grace=0 if strict else 1, grace_appearance_threshold=.8,
+            grace_min_detector_hits=3, grace_min_recent_confidence=.3,
+            recent_search_attempts=0 if strict else 2)
     assert metadata['locked_frames'] == 2 and metadata['predicted_only_frames'] == 6
     assert all(r['bbox'] is None and r['state'] == 'LOST' for r in rows[2:])
     assert len(rendered) == (0 if headless else 8)

@@ -14,7 +14,13 @@ from .run_artifacts import read_tracking_run, write_tracking_run
 from .tracking import Detection, SingleTargetTracker
 
 
-def draw_result(frame, result, frame_index, fps, zoom=False):
+def draw_result(frame, result, frame_index, fps, zoom=False, prediction=None):
+    """Share one zoom panel between observations and bounded search hints.
+
+    An accepted candidate is visible before confirmation. A forecast only
+    selects a crop of the CURRENT image; it never changes the tracking result.
+    Observed boxes always take precedence over a potentially lagging forecast.
+    """
     canvas = frame.copy()
     h, w = canvas.shape[:2]
     yellow = (0, 230, 255)
@@ -24,18 +30,30 @@ def draw_result(frame, result, frame_index, fps, zoom=False):
     cv2.putText(canvas, text, (23, 36), cv2.FONT_HERSHEY_SIMPLEX, .62, state_color, 1, cv2.LINE_AA)
     cv2.putText(canvas, f'{frame_index / fps:.2f}s  |  {result.source.upper()}',
                 (23, 57), cv2.FONT_HERSHEY_SIMPLEX, .43, (220, 220, 220), 1, cv2.LINE_AA)
-    if result.bbox is None or result.state != 'LOCKED':
+    observed = result.bbox is not None and result.state in ('LOCKED', 'CONFIRMING')
+    box = result.bbox if observed else None
+    if box is None and zoom:
+        box = (prediction or {}).get('bbox')
+    if box is None:
         return canvas
-    x1, y1, x2, y2 = map(float, result.bbox)
+    values = np.asarray(box, dtype=float)
+    if values.shape != (4,) or not np.isfinite(values).all():
+        return canvas
+    x1, y1, x2, y2 = values
     cx, cy = (x1+x2)/2, (y1+y2)/2
+    if x2 <= x1 or y2 <= y1 or not (0 <= cx < w and 0 <= cy < h):
+        return canvas
+    color = yellow if observed else (210, 210, 210)
     # Display padding helps a 10x3-pixel object remain visible. Saved boxes are
     # the actual measured coordinates, without this presentation-only padding.
     dw, dh = max(18, x2-x1+6), max(12, y2-y1+6)
     lo = (max(0, round(cx-dw/2)), max(0, round(cy-dh/2)))
     hi = (min(w-1, round(cx+dw/2)), min(h-1, round(cy+dh/2)))
-    cv2.rectangle(canvas, lo, hi, yellow, 1, cv2.LINE_AA)
-    cv2.putText(canvas, f'UAV {result.track_id}', (lo[0], max(14, lo[1]-6)),
-                cv2.FONT_HERSHEY_SIMPLEX, .43, yellow, 1, cv2.LINE_AA)
+    if observed:
+        cv2.rectangle(canvas, lo, hi, yellow, 1, cv2.LINE_AA)
+        label = f'UAV {result.track_id}' if result.state == 'LOCKED' else 'UAV candidate'
+        cv2.putText(canvas, label, (lo[0], max(14, lo[1]-6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, .43, yellow, 1, cv2.LINE_AA)
     if zoom and w >= 640 and h >= 360:
         cw, ch = min(96, w), min(54, h)
         left = int(np.clip(round(cx-cw/2), 0, w-cw))
@@ -45,13 +63,15 @@ def draw_result(frame, result, frame_index, fps, zoom=False):
         patch = cv2.resize(crop, (cw*scale, ch*scale), interpolation=cv2.INTER_NEAREST)
         p1 = (round((x1-left)*scale)-2, round((y1-top)*scale)-2)
         p2 = (round((x2-left)*scale)+2, round((y2-top)*scale)+2)
-        cv2.rectangle(patch, p1, p2, yellow, 1, cv2.LINE_AA)
+        cv2.rectangle(patch, p1, p2, color, 1, cv2.LINE_AA)
         ph, pw = patch.shape[:2]
         ox, oy = w-pw-20, 52
         cv2.rectangle(canvas, (ox-3, oy-28), (ox+pw+3, oy+ph+3), (25, 25, 25), -1)
         canvas[oy:oy+ph, ox:ox+pw] = patch
-        cv2.putText(canvas, f'TARGET ZOOM {scale}x', (ox+8, oy-9),
-                    cv2.FONT_HERSHEY_SIMPLEX, .48, yellow, 1, cv2.LINE_AA)
+        status = 'LOCKED' if result.state == 'LOCKED' else 'CANDIDATE'
+        title = f'TARGET ZOOM {scale}x | {status}' if observed else f'PREDICTED SEARCH {scale}x'
+        cv2.putText(canvas, title, (ox+8, oy-9),
+                    cv2.FONT_HERSHEY_SIMPLEX, .48, color, 1, cv2.LINE_AA)
     return canvas
 
 

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from yolomg_motion.roi_windows import crop_detect, motion_windows, square_window
+from yolomg_motion.roi_windows import contrast_windows, crop_detect, motion_windows, square_window
 from yolomg_motion.tracking import Detection
 
 
@@ -176,3 +176,51 @@ def test_invalid_image_or_motion_never_calls_detector():
         with pytest.raises(ValueError):
             crop_detect(detector, image, difference, (0, 0, 10, 10))
     assert detector.calls == []
+
+
+def test_contrast_finds_dark_and_light_targets_without_motion_and_preserves_pixels():
+    image = np.full((240, 480, 3), 120, np.uint8)
+    image[90:94, 90:98] = 20
+    image[110:114, 350:358] = 230
+    before = image.copy()
+    valid = np.ones(image.shape[:2], bool)
+    windows = contrast_windows(image, valid, side=64)
+    assert len(windows) == 2
+    for cx, cy in ((94, 92), (354, 112)):
+        assert any(x1 <= cx < x2 and y1 <= cy < y2 for x1, y1, x2, y2 in windows)
+    np.testing.assert_array_equal(image, before)
+    valid[:, :240] = False
+    windows = contrast_windows(image, valid, side=64)
+    assert len(windows) == 1 and windows[0][0] > 240
+    assert contrast_windows(image, valid, max_windows=0) == []
+
+
+def test_contrast_coordinates_return_to_native_resolution():
+    image = np.full((1080, 1920, 3), 160, np.uint8)
+    image[600:606, 1400:1412] = 30
+    windows = contrast_windows(image, np.ones(image.shape[:2], bool), side=160)
+    assert len(windows) == 1
+    x1, y1, x2, y2 = windows[0]
+    assert x1 <= 1406 < x2 and y1 <= 603 < y2
+    assert x2 - x1 == y2 - y1 == 160
+
+
+def test_contrast_does_not_fabricate_target_in_flat_image_or_invalid_region():
+    image = np.full((160, 240, 3), 90, np.uint8)
+    valid = np.ones(image.shape[:2], bool)
+    assert contrast_windows(image, valid) == []
+    image[70:74, 100:108] = 230
+    assert contrast_windows(image, np.zeros_like(valid)) == []
+    with pytest.raises(ValueError, match='valid_mask'):
+        contrast_windows(image, valid[:100])
+    with pytest.raises(ValueError, match='frame'):
+        contrast_windows(image.astype(np.float32), valid)
+
+
+def test_contrast_prefers_isolated_target_over_similar_texture():
+    image = np.full((240, 480, 3), 120, np.uint8)
+    rng = np.random.default_rng(8)
+    image[30:210, 20:200] = rng.integers(30, 230, (180, 180, 1), dtype=np.uint8)
+    image[110:114, 350:358] = 230
+    window = contrast_windows(image, np.ones(image.shape[:2], bool), side=64, max_windows=1)[0]
+    assert window[0] <= 354 < window[2] and window[1] <= 112 < window[3]

@@ -62,6 +62,35 @@ def install_pipeline(monkeypatch, fail_at=None):
     return observed
 
 
+def test_enhanced_detection_options_are_wired_and_recorded(tmp_path, monkeypatch):
+    source, output = tmp_path/'input.mp4', tmp_path/'result'
+    make_video(source)
+    observed = install_pipeline(monkeypatch)
+    assert roi_cli.main(['--pipeline', 'zoom', '--input', str(source), '--output', str(output),
+                         '--contrast-search', '--scale-retry', '--no-video']) == 0
+    assert observed['contrast_search'] and observed['scale_retry']
+    _, metadata = read_tracking_run(output)
+    assert metadata['contrast_search'] and metadata['scale_retry']
+    assert metadata['scale_retry_frames'] == 0  # The fake pipeline performs no retry.
+
+
+def test_adaptive_roi_and_weak_floor_preserve_regular_acquisition_threshold(tmp_path, monkeypatch):
+    source, output = tmp_path/'input.mp4', tmp_path/'result'
+    make_video(source)
+    observed = install_pipeline(monkeypatch)
+    assert roi_cli.main(['--pipeline', 'zoom', '--motion-prediction',
+                         '--input', str(source), '--output', str(output),
+                         '--adaptive-roi', '--low-confidence', '.04', '--no-video']) == 0
+    assert observed['adaptive_roi']
+    assert observed['detector']['conf_threshold'] == .04
+    assert observed['tracker'].min_confidence == .1
+    assert observed['tracker'].low_confidence == .04
+    _, metadata = read_tracking_run(output)
+    assert metadata['adaptive_roi'] and metadata['confidence_threshold'] == .04
+    assert metadata['regular_confidence_threshold'] == metadata['lock_confidence_threshold'] == .1
+    assert metadata['low_confidence_floor'] == .04 and metadata['low_confidence_frames'] == 0
+
+
 @pytest.mark.parametrize('headless', [False, True])
 def test_zoom_default_selection_multiple_calls_and_artifacts(tmp_path, monkeypatch, headless):
     source, output = tmp_path/'input.mp4', tmp_path/'result'
@@ -128,6 +157,11 @@ def test_zoom_explicit_parameters_and_failed_partial(tmp_path, monkeypatch):
 @pytest.mark.parametrize('extra', [
     ['--roi-size', '0'], ['--motion-context', '319'], ['--max-rois', '0'],
     ['--zoom-detect-every', '0'], ['--motion-threshold', 'nan'], ['--scan-every', '0'],
+    ['--adaptive-roi'], ['--low-confidence', '.04'],
+    ['--motion-prediction', '--low-confidence', 'nan'],
+    ['--motion-prediction', '--low-confidence', '.1'],
+    ['--motion-prediction', '--low-confidence', '-.01'],
+    ['--motion-prediction', '--low-confidence', '.02'],
 ])
 def test_invalid_zoom_budget_or_size_is_rejected_before_model_load(tmp_path, monkeypatch, extra):
     source = tmp_path/'input.mp4'

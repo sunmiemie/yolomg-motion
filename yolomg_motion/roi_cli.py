@@ -44,7 +44,17 @@ def main(argv=None):
     parser.add_argument('--scan-every', type=int, default=3,
                         help='Use a scan window every N zoom search attempts to cover weak-motion targets')
     parser.add_argument('--motion-prediction', action='store_true',
-                        help='Opt-in motion prediction for zoom search and trajectory overlays; does not confirm detections')
+                        help='Opt-in motion prediction for bounded zoom search; does not confirm detections')
+    parser.add_argument('--strict-verification', action='store_true',
+                        help='Reproduce the original prediction policy: no visual grace or recent-target search')
+    parser.add_argument('--contrast-search', action='store_true',
+                        help='Use one existing zoom search slot for compact light/dark image candidates')
+    parser.add_argument('--scale-retry', action='store_true',
+                        help='Try an alternate local crop scale for small targets on smooth backgrounds')
+    parser.add_argument('--adaptive-roi', action='store_true',
+                        help='Choose a bounded primary crop scale from recent confirmed target sizes')
+    parser.add_argument('--low-confidence', type=float,
+                        help='Optional lower score floor for tightly checked existing-target support only')
     parser.add_argument('--prediction-max-gap', type=int, default=20,
                         help='Maximum source frames to retain an unobserved prediction')
     parser.add_argument('--prediction-gate', type=float, default=16.,
@@ -83,6 +93,14 @@ def main(argv=None):
             min(args.max_rois, args.zoom_detect_every, args.scan_every) < 1 or
             not np.isfinite(args.motion_threshold) or not 0 < args.motion_threshold <= 255):
         parser.error('Invalid zoom ROI, context, network-call budget, interval or motion threshold')
+    if args.strict_verification and not args.motion_prediction:
+        parser.error('--strict-verification requires --motion-prediction')
+    if (args.contrast_search or args.scale_retry) and args.pipeline != 'zoom':
+        parser.error('--contrast-search and --scale-retry require --pipeline zoom')
+    if (args.adaptive_roi or args.low_confidence is not None) and not args.motion_prediction:
+        parser.error('--adaptive-roi and --low-confidence require --motion-prediction')
+    if args.low_confidence is not None and not .04 <= args.low_confidence < args.confidence:
+        parser.error('--low-confidence must be at least .04 and below --confidence')
     if args.motion_prediction:
         if args.pipeline != 'zoom':
             parser.error('--motion-prediction requires --pipeline zoom')
@@ -94,8 +112,9 @@ def main(argv=None):
             parser.error('Invalid prediction gap, association gate, process noise or maximum ROI')
     cv2.setNumThreads(args.threads)
     weights = args.weights or args.repo/'runs/train/ARD100_mask32-1280_uavs/weights/best.pt'
+    detector_floor = args.confidence if args.low_confidence is None else args.low_confidence
     options = dict(repo_dir=args.repo, weights=weights, image_size=args.image_size,
-                   conf_threshold=args.confidence, threads=args.threads)
+                   conf_threshold=detector_floor, threads=args.threads)
     setup_started = perf_counter()
     if args.device == 'directml':
         from .directml_detector import DirectMLYOLOMGDetector
@@ -112,7 +131,9 @@ def main(argv=None):
         from .predictive_tracking import PredictiveTargetTracker
         tracker = PredictiveTargetTracker(**tracker_options, prediction_max_gap=args.prediction_max_gap,
                                           prediction_gate=args.prediction_gate,
-                                          process_noise=args.prediction_process_noise)
+                                          process_noise=args.prediction_process_noise,
+                                          verification_grace=0 if args.strict_verification else 1,
+                                          low_confidence=args.low_confidence)
     else:
         tracker = SingleTargetTracker(**tracker_options)
     local_extractor = None
@@ -121,11 +142,15 @@ def main(argv=None):
             MotionConfig(alignment_width=320, alignment_height=320, grid_step=24, grid_step_y=24,
                          min_inliers=10, blur_size=5, open_iterations=0, close_iterations=0),
             backend=args.motion_backend)
-        prediction_options = dict(prediction_max_roi=args.prediction_max_roi) if args.motion_prediction else {}
+        prediction_options = dict(prediction_max_roi=args.prediction_max_roi,
+                                  recent_search_attempts=0 if args.strict_verification else 2) if args.motion_prediction else {}
         pipeline = ZoomROIPipeline(detector, extractor, tracker, local_extractor=local_extractor,
                                    detect_every=args.zoom_detect_every, roi_size=args.roi_size,
                                    motion_context=args.motion_context, max_rois=args.max_rois,
                                    motion_threshold=args.motion_threshold, scan_every=args.scan_every,
+                                   contrast_search=args.contrast_search,
+                                   scale_retry=args.scale_retry,
+                                   adaptive_roi=args.adaptive_roi,
                                    **prediction_options)
     else:
         pipeline = ROIPipeline(detector, extractor, tracker, args.detect_every, args.verify_every)
@@ -166,7 +191,8 @@ def main(argv=None):
                        timestamp_seconds=observation.frame_index/fps)
             tick = perf_counter()
             if not args.no_video:
-                canvas = draw_result(observation.frame, observation.result, observation.frame_index, fps, zoom=True)
+                canvas = draw_result(observation.frame, observation.result, observation.frame_index, fps,
+                                     zoom=True, prediction=observation.details.get('prediction'))
                 if trajectory is not None:
                     canvas = trajectory.render(canvas, observation.result, observation.frame_index,
                                                observation.details, fps=fps)
@@ -203,7 +229,7 @@ def main(argv=None):
                  for key in ('motion_seconds', 'detector_seconds', 'tracking_seconds')}
         metadata = dict(pipeline='roi_zoom_detection' if args.pipeline == 'zoom' else 'detect_then_roi',
                         input=str(args.input.resolve()), weights=str(weights.resolve()),
-                        model_input_size=args.image_size, confidence_threshold=args.confidence,
+                        model_input_size=args.image_size, confidence_threshold=detector_floor,
                         lock_confidence_threshold=args.lock_confidence, confirmations=args.confirmations,
                         detect_every=args.zoom_detect_every if args.pipeline == 'zoom' else args.detect_every,
                         verify_every=None if args.pipeline == 'zoom' else args.verify_every, max_detector_gap=None,
@@ -261,16 +287,40 @@ def main(argv=None):
                      'Inference is synchronous; desktop throughput is not RKNN or board performance. '
                      'Timing excludes final JSON serialization; wall includes decode, optional draw/encode and writer flush.')
             stage['proposal_seconds'] = sum(r['stage_timings'].get('proposal_seconds', 0.) for r in rows)
+        if args.pipeline == 'zoom':
+            metadata['contrast_search'] = args.contrast_search
+            metadata['scale_retry'] = args.scale_retry
+            metadata['scale_retry_frames'] = sum(bool(r.get('scale_retry_used')) for r in rows)
+            metadata['adaptive_roi'] = args.adaptive_roi
+            metadata['adaptive_roi_frames'] = sum(bool(r.get('adaptive_roi_used')) for r in rows)
+            metadata['low_confidence_floor'] = args.low_confidence
+            metadata['low_confidence_frames'] = sum(bool(r.get('low_confidence_used')) for r in rows)
+            metadata['regular_confidence_threshold'] = args.confidence
+            metadata['adaptive_roi_policy'] = dict(target_network_pixels=32, size_history=3,
+                min_roi_ratio=.7, side_alignment=16, max_change_per_detection=32,
+                regular_window_fallback=args.scale_retry)
+            metadata['scale_retry_policy'] = dict(
+                scale=.7, side_alignment=16, min_side=16, background_side=64,
+                excluded_center_side=32, max_target_side=32, max_background_std=12.,
+                min_background_samples=32, max_center_distance=args.search_radius,
+                adaptive_fallback='nominal_roi')
         if args.motion_prediction:
             metadata.update(
                 motion_prediction=dict(enabled=True, max_gap_frames=args.prediction_max_gap,
                                        gate_threshold=args.prediction_gate, process_noise=args.prediction_process_noise,
                                        max_roi=args.prediction_max_roi, velocity_units='pixels/frame',
-                                       trajectory_points=60, trajectory_history_visible=False),
+                                       trajectory_points=60, trajectory_history_visible=False,
+                                       prediction_overlay_visible=False,
+                                       verification_grace=tracker.verification_grace,
+                                       grace_appearance_threshold=max(.8, args.appearance_threshold),
+                                       grace_min_detector_hits=3,
+                                       grace_min_recent_confidence=max(.3, args.lock_confidence),
+                                       recent_search_attempts=0 if args.strict_verification else 2),
+                verification_pending_frames=sum(bool(r.get('verification_pending')) for r in rows),
                 predicted_only_frames=sum(
                     bool((r.get('prediction') or {}).get('coasting'))
                     for r in rows))
-            metadata['note'] += (' Motion predictions guide bounded ROI search and are drawn dashed. '
+            metadata['note'] += (' Motion predictions guide bounded ROI search; prediction overlays are hidden by default. '
                                  'Predicted-only positions are not observed boxes or locked target coordinates.')
         write_tracking_run(args.output, rows, metadata)
         print(json.dumps(metadata, ensure_ascii=False, indent=2))

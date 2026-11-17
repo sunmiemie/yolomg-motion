@@ -24,7 +24,7 @@ def test_renderer_keeps_input_and_predictions_unchanged_and_draws_overlays():
     details = dict(prediction=prediction(), prediction_roi=[45, 45, 130, 120],
                    detection_windows=[[40, 40, 140, 125]])
     saved = deepcopy(details)
-    renderer = TrajectoryRenderer()
+    renderer = TrajectoryRenderer(show_prediction=True)
     canvas = renderer.render(frame, TrackResult('LOST'), 2, details, fps=30.)
     assert np.array_equal(frame, original)
     assert details == saved
@@ -66,7 +66,7 @@ def test_coasting_does_not_extend_solid_trail_and_reacquisition_breaks_line():
 
 def test_out_of_frame_forecast_is_clipped_for_drawing_and_shape_change_resets():
     frame = np.zeros((200, 320, 3), np.uint8)
-    renderer = TrajectoryRenderer()
+    renderer = TrajectoryRenderer(show_prediction=True)
     renderer.render(frame, locked(0), 0)
     forecast = prediction()
     forecast.update(center=[1.e8, -1.e8], future_center=[2.e8, -2.e8],
