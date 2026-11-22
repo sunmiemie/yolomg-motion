@@ -37,3 +37,23 @@ def test_image_size_is_validated_before_model_or_cache_loading(tmp_path, capsys)
                         '--detection-cache', str(tmp_path / 'absent'), '--image-size', '0'])
     assert exc.value.code == 2
     assert 'image-size' in capsys.readouterr().err
+
+
+def test_lk_window_config_is_rejected_before_video_or_output_creation(tmp_path, monkeypatch, capsys):
+    video = tmp_path / 'input.mp4'
+    video.write_bytes(b'synthetic input must not be opened as a video')
+    config = tmp_path / 'motion.json'
+    config.write_text('{"lk_window": 1}', encoding='utf-8')
+    output = tmp_path / 'out'
+    originals = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    monkeypatch.setattr(cli.cv2, 'VideoCapture', lambda *a: pytest.fail('opened video before validating lk_window'))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['--input', str(video), '--output', str(output), '--config', str(config)])
+
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert 'lk_window' in error and '3' in error
+    assert 'Traceback' not in error
+    assert not output.exists()
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == originals

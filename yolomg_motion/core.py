@@ -55,10 +55,12 @@ class MotionConfig:
                     'alignment_height', 'lk_iterations'):
             if getattr(self, key) < 1:
                 raise ValueError(f'{key} must be positive')
-        for key in ('blur_size', 'lk_window', 'morph_kernel'):
+        for key in ('blur_size', 'morph_kernel'):
             value = getattr(self, key)
             if value < 1 or value % 2 == 0:
                 raise ValueError(f'{key} must be a positive odd integer')
+        if self.lk_window < 3 or self.lk_window % 2 == 0:
+            raise ValueError('lk_window must be an odd integer >= 3')
         if self.min_inliers < 4:
             raise ValueError('A homography requires at least four inliers')
         if not 0 < self.min_inlier_ratio <= 1 or not 0 < self.min_overlap <= 1:

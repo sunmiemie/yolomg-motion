@@ -29,3 +29,8 @@ def test_numpy_numeric_settings_remain_accepted():
     config = MotionConfig(frame_step=np.int64(2), fb_threshold=np.float32(1.5))
     assert config.frame_step == 2
     assert config.fb_threshold == 1.5
+
+
+def test_lk_window_rejects_unit_window_before_processing():
+    with pytest.raises(ValueError, match=r'lk_window.*(?:at least 3|>=\s*3)'):
+        MotionConfig(lk_window=1)

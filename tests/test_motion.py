@@ -93,6 +93,23 @@ def test_three_frame_difference_uses_float_before_subtraction_and_averaging():
     np.testing.assert_array_equal(difference, expected)
 
 
+def test_minimum_lk_window_runs_with_unit_blur_and_morphology_kernels():
+    frame = np.random.default_rng(21).integers(0, 256, (64, 64, 3), dtype=np.uint8)
+    config = MotionConfig(
+        lk_window=3, blur_size=1, morph_kernel=1,
+        alignment_width=64, alignment_height=64,
+        grid_step=8, grid_step_y=8, min_inliers=4,
+    )
+
+    result = MotionExtractor(config, backend='cpu').process_triplet(frame, frame, frame)
+
+    assert result.success, (result.previous_alignment.reason, result.next_alignment.reason)
+    assert result.valid_mask.any()
+    np.testing.assert_array_equal(result.center_gray, cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    np.testing.assert_array_equal(result.difference, np.zeros((64, 64), dtype=np.float32))
+    np.testing.assert_array_equal(result.motion, result.difference)
+
+
 @pytest.mark.parametrize(
     "previous_to_current,next_to_current",
     [

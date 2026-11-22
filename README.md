@@ -82,7 +82,7 @@ $$
 | `grid_step_y` | `48` | 估计图像中网格采样点的垂直间距，单位为像素。 |
 | `alignment_width` | `1920` | 估计图像宽度。 |
 | `alignment_height` | `1080` | 估计图像高度。 |
-| `lk_window` | `15` | LK 搜索窗口边长，正奇数。 |
+| `lk_window` | `15` | LK 搜索窗口边长，至少为 `3` 的奇数。 |
 | `lk_levels` | `3` | OpenCV `maxLevel`，即最高金字塔层级编号。 |
 | `lk_iterations` | `30` | LK 最大迭代次数。 |
 | `lk_epsilon` | `0.003` | LK 迭代终止精度。 |
